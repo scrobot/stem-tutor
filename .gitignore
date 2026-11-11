@@ -1,0 +1,18 @@
+# Dependencies and build output
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+backend/.venv/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Local state: lesson data, the separation choice start.bat remembers, logs
+data/
+.with-separation
+*.log
+
+# Local tool settings (machine-specific paths)
+.claude/

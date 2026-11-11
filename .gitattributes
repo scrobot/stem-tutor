@@ -1,0 +1,3 @@
+# Windows batch files must keep CRLF: with LF endings and chcp 65001 cmd.exe misparses them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
