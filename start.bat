@@ -57,6 +57,8 @@ del "%HEALTH%" >nul 2>nul
 if not "%RUNNING%"=="0" goto notrunning
 if defined ST_ACTION goto busy
 echo StemTutor уже запущен — открываю http://127.0.0.1:%ST_PORT%/
+echo Если вы обновили StemTutor или перенесли его папку: закройте окно запущенного сервера
+echo (заголовок «StemTutor») и снова запустите start.bat — иначе продолжит работать старая версия.
 if not defined ST_NO_BROWSER start "" "http://127.0.0.1:%ST_PORT%/"
 exit /b 0
 :busy

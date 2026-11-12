@@ -13,6 +13,13 @@ import type {
   Settings,
 } from './types'
 
+/**
+ * What this UI needs from the server (GET /api/health → `api`). Raise it together with
+ * server.py's API_LEVEL when the UI starts using new routes: an older server then gets a banner
+ * asking to restart it.
+ */
+export const API_LEVEL = 2
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, message: string) {

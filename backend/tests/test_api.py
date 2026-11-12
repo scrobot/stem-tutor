@@ -19,6 +19,7 @@ def _create_midi_lesson(client, tmp_path, with_reference: bool = False):
 def test_health_and_settings(client):
     h = client.get("/api/health").json()
     assert h["ok"] is True and "engines" in h
+    assert h["api"] == 2  # the web UI asks to restart an older server (api.ts API_LEVEL)
     s = client.get("/api/settings").json()
     assert s["instrumentId"] == "akai-mpk-mini-mk3"
     s["instrumentId"] = "generic-49"

@@ -1264,7 +1264,8 @@ canvas.waterfall:focus-visible {
   font-size: 12px;
   color: var(--muted);
   margin-top: -4px;
-  min-height: 16px;
+  /* Two lines held: the hint changes on start/pause, and the note view must not jump. */
+  min-height: 2.9em;
 }
 
 /* -- cover plan ------------------------------------------------------------------------ */
@@ -1440,4 +1441,14 @@ canvas.waterfall:focus-visible {
 }
 .more-loops > .cover-steps {
   margin-top: 6px;
+}
+.server-banner {
+  margin: 0;
+  padding: 10px 24px;
+  background: rgba(255, 181, 71, 0.12);
+  border-bottom: 1px solid rgba(255, 181, 71, 0.45);
+  color: var(--fg);
+}
+.ai-page .lead {
+  max-width: 820px;
 }

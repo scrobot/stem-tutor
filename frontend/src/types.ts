@@ -182,6 +182,8 @@ export interface ProducerRequest {
 export interface Health {
   ok: boolean
   version: string
+  /** What the server can do (api.ts API_LEVEL); absent on servers older than the cover plan. */
+  api?: number
   ffmpeg: boolean
   engines: Record<
     string,

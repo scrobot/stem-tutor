@@ -35,6 +35,53 @@ export interface PatternAnalysis {
 
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
+/** One block as the note view marks it: its letter, and which time of its loop it is. */
+export interface BlockMark {
+  startBeat: number
+  endBeat: number
+  startBar: number
+  bars: number
+  label: string
+  patternId: number
+  /** 1 for the first time this loop plays, 2 for the second… */
+  nth: number
+  /** How many times the loop plays in the part. */
+  total: number
+  /** The loop this one is a near copy of (A for A′), or null. */
+  variantOf: string | null
+}
+
+/** The non-empty blocks of an analysis in song order, each with its loop's count so far. */
+export function blockMarks(p: PatternAnalysis): BlockMark[] {
+  const seen = new Map<number, number>()
+  const out: BlockMark[] = []
+  for (const u of p.units) {
+    if (u.empty) continue
+    const pat = p.patterns[u.patternId]
+    if (!pat) continue
+    const nth = (seen.get(pat.id) ?? 0) + 1
+    seen.set(pat.id, nth)
+    out.push({
+      startBeat: u.startBeat,
+      endBeat: u.endBeat,
+      startBar: u.startBar,
+      bars: u.bars,
+      label: u.label,
+      patternId: pat.id,
+      nth,
+      total: pat.units.length,
+      variantOf: pat.variantOf !== null ? p.patterns[pat.variantOf]?.label ?? null : null,
+    })
+  }
+  return out
+}
+
+/** «A · новая», «A · 2-й раз», «A′ · почти как A» — the mark at the start of a block. */
+export function blockMarkText(m: Pick<BlockMark, 'label' | 'nth' | 'variantOf'>): string {
+  if (m.nth > 1) return `${m.label} · ${m.nth}-й раз`
+  return m.variantOf ? `${m.label} · почти как ${m.variantOf}` : `${m.label} · новая`
+}
+
 /**
  * The block that repeats most often (the main loop of the part), or the first non-empty one —
  * past a lead-in bar (a pickup is never the main loop).

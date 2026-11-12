@@ -1,8 +1,10 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { BrowserRouter, Link, NavLink, Route, Routes } from 'react-router-dom'
+import { API_LEVEL, api } from './api'
 import { resumeAudio } from './audio/engine'
 import { matchProfile, profileById } from './instruments/profiles'
 import { useMidi, type MidiPortInfo } from './midi/midi'
+import AiPage from './pages/AiPage'
 import { BuiltinLessonPage, BuiltinTutorialPage, ChordsCatalogPage } from './pages/ChordsPage'
 import CoverPage from './pages/CoverPage'
 import GlossaryPage from './pages/GlossaryPage'
@@ -45,6 +47,27 @@ function MidiStatus() {
   )
 }
 
+/**
+ * The web UI is rebuilt with the app, but a server started before an update keeps running the
+ * old code (start.bat only opens a running server). Say so, plainly, on every page.
+ */
+function OldServerBanner() {
+  const [old, setOld] = useState(false)
+  useEffect(() => {
+    api.health().then(
+      (h) => setOld((h.api ?? 1) < API_LEVEL),
+      () => undefined,
+    )
+  }, [])
+  if (!old) return null
+  return (
+    <div className="server-banner" role="alert">
+      <b>Запущен старый сервер StemTutor</b>, а интерфейс уже новый — часть функций (план кавера, ИИ-продюсер) не работает. Закройте окно
+      сервера (чёрное окно с заголовком «StemTutor») и снова запустите start.bat.
+    </div>
+  )
+}
+
 export default function App() {
   const loaded = useSettings((s) => s.loaded)
   useEffect(() => {
@@ -75,10 +98,12 @@ export default function App() {
           </NavLink>
           <NavLink to="/learn">Аккорды и разминка</NavLink>
           <NavLink to="/instrument">Клавиатура</NavLink>
+          <NavLink to="/ai">ИИ-продюсер</NavLink>
           <NavLink to="/help">Словарик</NavLink>
         </nav>
         <MidiStatus />
       </header>
+      <OldServerBanner />
       <main>
         {!loaded ? (
           <div className="page">
@@ -95,6 +120,7 @@ export default function App() {
             <Route path="/learn/:lessonId" element={<BuiltinLessonPage />} />
             <Route path="/learn/:lessonId/:exId" element={<BuiltinTutorialPage />} />
             <Route path="/help" element={<GlossaryPage />} />
+            <Route path="/ai" element={<AiPage />} />
             <Route path="*" element={<LibraryPage />} />
           </Routes>
         )}

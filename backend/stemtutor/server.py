@@ -27,6 +27,10 @@ from .pipeline import ffmpeg
 from .schemas import AiSettingsPatch, Lesson, LessonPatch, LessonSummary, ProducerRequest, Settings, SourceInfo
 from .storage import LessonRepo, NotFound, SettingsStore, safe_filename, slugify
 
+# What this server can do, reported by /api/health: the web UI (api.ts API_LEVEL) asks the user to
+# restart an older server. 2: the cover plan and the AI producer.
+API_LEVEL = 2
+
 MEDIA_TYPES = {
     ".ogg": "audio/ogg",
     ".opus": "audio/ogg",
@@ -193,6 +197,7 @@ def create_app(cfg: AppConfig | None = None, synchronous_jobs: bool = False) -> 
         return {
             "ok": True,
             "version": __version__,
+            "api": API_LEVEL,
             "ffmpeg": ffmpeg.ffmpeg_exe() is not None,
             "engines": _engine_status(probe),
             "dataDir": str(cfg.data_dir),

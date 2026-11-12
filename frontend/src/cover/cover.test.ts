@@ -3,7 +3,8 @@ import { profileById } from '../instruments/profiles'
 import { exportCoverMidi } from '../music/exportMidi'
 import { beatTime } from '../music/grid'
 import { layerBlocks } from '../music/model'
-import { analyzeBlocks, mainUnit } from '../music/patterns'
+import { analyzeBlocks, blockMarkText, blockMarks, mainUnit } from '../music/patterns'
+import { blockMarkTitle, freeSpot, groupFlashes } from '../components/Waterfall'
 import type { Grid, Lesson, Part, ProducerAnswer, Role } from '../types'
 import { appBars, buildCoverPlan, dawBars, placement, type CoverPlan } from './plan'
 import { applyProducer, audioWindow, buildDigest, fingerprint, loopAlias, playerLine, trackAlias } from './producer'
@@ -178,6 +179,46 @@ describe('cover plan by rules', () => {
     const blocks = analyzeBlocks([{ start: 0, target: 1 }, { start: 4, target: 1 }, { start: 8, target: 1 }], lesson.grid!, 0, 2)
     expect(blocks.patterns).toHaveLength(1)
     expect(blocks.leadIn).toBeUndefined()
+  })
+
+  it('marks every block on the note view: its letter, and new or the n-th time', () => {
+    const plan = planOf()
+    const lesson = song()
+    const mel = plan.tracks.find((t) => t.id === 'mel:all')!
+    const blocks = layerBlocks(plan.models.get('mel')!, lesson.grid!, mel.layerIndex)
+    const marks = blockMarks(blocks)
+    expect(marks.map((m) => `${m.label}${m.nth}/${m.total}`)).toEqual(['A1/3', 'A2/3', 'B1/1', 'A3/3'])
+    expect(marks.map(blockMarkText)).toEqual(['A · новая', 'A · 2-й раз', 'B · новая', 'A · 3-й раз'])
+    expect(blockMarkTitle(lesson.grid!, marks[1])).toBe('такты 5–8 — петля A, 2-й раз из 3. Одинаковые буквы — одинаковая музыка.')
+    expect(blockMarkTitle(lesson.grid!, marks[2])).toMatch(/^такты 9–12 — петля B, звучит один раз\./)
+    expect(blockMarkText({ label: 'A′', nth: 1, variantOf: 'A' })).toBe('A′ · почти как A')
+  })
+
+  it('puts a loop letter in the first free spot of its row, clear of the notes', () => {
+    expect(freeSpot([], 30, 80, 900)).toBe(30)
+    expect(freeSpot([[2, 58]], 30, 80, 900)).toBe(61) // a low note at the start: right after it
+    expect(freeSpot([[200, 260], [2, 58], [62, 118]], 30, 70, 900)).toBe(121) // between notes
+    expect(freeSpot([[200, 260], [2, 58], [62, 118]], 30, 80, 900)).toBe(263) // too narrow there: after the next
+    expect(freeSpot([[2, 58], [62, 118], [122, 178]], 30, 40, 900)).toBe(181)
+    expect(freeSpot([[0, 880]], 30, 80, 900)).toBeNull() // a full row
+  })
+
+  it('a chord’s grade words are drawn once, over the middle of its keys', () => {
+    const at = (x: number, text: string, t: number) => ({ x, text, color: '#fff', t })
+    const lines = (g: ReturnType<typeof groupFlashes>) => g.map((s) => `${s.x}: ${s.lines.map((l) => l.text).join(' / ')}`)
+    // same word on a triad pressed within a few ms: once, in the middle
+    expect(lines(groupFlashes([at(100, 'Точно!', 0), at(130, 'Точно!', 15), at(160, 'Точно!', 30)]))).toEqual(['130: Точно!'])
+    // mixed words: one line each
+    expect(lines(groupFlashes([at(100, 'Точно!', 0), at(130, 'Хорошо · поздно', 20), at(160, 'Точно!', 30)]))).toEqual([
+      '130: Точно! / Хорошо · поздно',
+    ])
+    // fast notes one after another stay apart; one-glyph marks stay over their own keys
+    expect(lines(groupFlashes([at(100, 'Точно!', 0), at(200, 'Точно!', 150), at(130, '×', 150), at(260, '×', 155)]))).toEqual([
+      '100: Точно!',
+      '200: Точно!',
+      '130: ×',
+      '260: ×',
+    ])
   })
 
   it('a lead-in bar is never the main loop (★), even when nothing repeats', () => {

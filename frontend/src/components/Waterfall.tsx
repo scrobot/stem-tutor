@@ -13,6 +13,7 @@ import { useEffect, useRef, type MutableRefObject } from 'react'
 import { keyboardGeometry, type KeyGeom } from '../instruments/layout'
 import { barOfBeat, barStartBeat } from '../music/grid'
 import { noteName, type OctaveNames } from '../music/notes'
+import { blockMarkText, type BlockMark } from '../music/patterns'
 import type { TutorEvent, TutorLanes } from '../tutorial/events'
 import type { Grid } from '../types'
 
@@ -80,6 +81,13 @@ export function rangeLabel(grid: Grid, r: BeatRange): string {
   return `с такта ${b0 + 1} (доля ${beatIn(r.start, b0)}) до такта ${b1 + 1}`
 }
 
+/** «такты 5–8 — петля A, 2-й раз из 4» — what a block of the note view is (a hover hint). */
+export function blockMarkTitle(grid: Grid, m: BlockMark): string {
+  const loop = m.variantOf ? `петля ${m.label} (почти как ${m.variantOf})` : `петля ${m.label}`
+  const time = m.total === 1 ? 'звучит один раз' : m.nth === 1 ? `первый раз из ${m.total}` : `${m.nth}-й раз из ${m.total}`
+  return `${rangeLabel(grid, { start: m.startBeat, end: m.endBeat })} — ${loop}, ${time}. Одинаковые буквы — одинаковая музыка.`
+}
+
 interface Props {
   lanes: TutorLanes
   events: TutorEvent[]
@@ -100,6 +108,8 @@ interface Props {
   resetKey?: string
   /** Ctrl + wheel: zoom by this factor. */
   onZoom?: (factor: number) => void
+  /** The part's blocks (the same letters as «Из чего состоит дорожка»): marked on the view. */
+  blocks?: BlockMark[]
 }
 
 const GRADE_COLOR: Record<Grade, string> = { perfect: '#5bd6a7', good: '#9be37a', ok: '#ffd36b', miss: '#ff6b6b' }
@@ -113,6 +123,55 @@ function roundRect(g: CanvasRenderingContext2D, x: number, y: number, w: number,
   g.arcTo(x, y + h, x, y, rr)
   g.arcTo(x, y, x + w, y, rr)
   g.closePath()
+}
+
+interface Box {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/**
+ * The first x at or after `from` where something `width` wide fits between the `taken` spans
+ * (and before `limit`), or null when the row is full.
+ */
+export function freeSpot(taken: [number, number][], from: number, width: number, limit: number): number | null {
+  let x = from
+  for (const [a, b] of taken.slice().sort((p, q) => p[0] - q[0])) {
+    if (b <= x) continue
+    if (a >= x + width) break
+    x = b + 3
+  }
+  return x + width <= limit ? x : null
+}
+
+export interface Flash {
+  /** The middle of the key (or of a chord's keys) the text goes over. */
+  x: number
+  text: string
+  color: string
+  t: number
+}
+
+/**
+ * The grade texts to draw. A chord's tones are graded at once (within 80 ms), and their words side
+ * by side would run into each other: each word once, over the middle of the chord's keys, one line
+ * per different word («Точно!» over «Хорошо · поздно»). One-glyph marks (✓, ×) stay over their key.
+ */
+export function groupFlashes(flashes: Flash[]): { x: number; t: number; lines: { text: string; color: string }[] }[] {
+  const groups: { t: number; word: boolean; xs: number[]; lines: { text: string; color: string }[] }[] = []
+  for (const f of flashes) {
+    const word = f.text.length > 1
+    const group = word ? groups.find((s) => s.word && Math.abs(s.t - f.t) < 80) : undefined
+    if (!group) {
+      groups.push({ t: f.t, word, xs: [f.x], lines: [{ text: f.text, color: f.color }] })
+      continue
+    }
+    group.xs.push(f.x)
+    if (!group.lines.some((l) => l.text === f.text)) group.lines.push({ text: f.text, color: f.color })
+  }
+  return groups.map((s) => ({ x: s.xs.reduce((a, b) => a + b, 0) / s.xs.length, t: s.t, lines: s.lines }))
 }
 
 interface Drag {
@@ -132,6 +191,10 @@ export function Waterfall(props: Props) {
   useEffect(() => {
     const el = canvas.current!
     const ctx = el.getContext('2d')!
+    // ctx.font takes no CSS variables (a font with var() is ignored and stays 10px): resolve the
+    // app's font family once.
+    const family = getComputedStyle(document.documentElement).getPropertyValue('--sans').trim() || 'system-ui, sans-serif'
+    const font = (weight: number, px: number) => `${weight} ${px}px ${family}`
     let raf = 0
     let w = 0
     let h = 0
@@ -205,7 +268,12 @@ export function Waterfall(props: Props) {
       drag = { a: beat, b: beat, y0: y, moved: false, fine: e.altKey, id: e.pointerId }
       el.setPointerCapture(e.pointerId)
     }
+    // Where the pointer is, for the hover hint (the frame loop names the block under it, so the
+    // hint follows the tape as it moves).
+    let pointerY: number | null = null
+    let lastTitle = ''
     const onMove = (e: PointerEvent) => {
+      pointerY = localY(e)
       if (!drag || e.pointerId !== drag.id) return
       const y = localY(e)
       drag.b = yToBeat(Math.max(0, Math.min(geom.hitY, y)))
@@ -232,6 +300,9 @@ export function Waterfall(props: Props) {
     const onCancel = () => {
       drag = null
     }
+    const onLeave = () => {
+      pointerY = null
+    }
     el.addEventListener('wheel', onWheel, { passive: false })
     el.addEventListener('keydown', onKey)
     el.addEventListener('dblclick', onDouble)
@@ -239,6 +310,7 @@ export function Waterfall(props: Props) {
     el.addEventListener('pointermove', onMove)
     el.addEventListener('pointerup', onUp)
     el.addEventListener('pointercancel', onCancel)
+    el.addEventListener('pointerleave', onLeave)
 
     let keyCache: { key: string; geo: KeyGeom[] } | null = null
     const laneGeo = (p: Props, kbTop: number, kbH: number): KeyGeom[] => {
@@ -307,7 +379,7 @@ export function Waterfall(props: Props) {
       const g = p.grid
       const firstBar = Math.floor((visFrom - g.firstDownbeat) / g.barLength) - 1
       const lastBar = Math.ceil((visTo - g.firstDownbeat) / g.barLength) + 1
-      ctx.font = '600 12px var(--sans, system-ui)'
+      ctx.font = font(600, 12)
       for (let bar = firstBar; bar <= lastBar; bar++) {
         const b0 = barStartBeat(g, bar)
         for (let k = 0; k < g.barLength; k++) {
@@ -322,15 +394,36 @@ export function Waterfall(props: Props) {
         }
       }
 
+      // Loops, in the colours of «Из чего состоит дорожка»: a band down the left edge (bright the
+      // first time a loop plays, dim on its repeats) and a line where each block starts, under
+      // the notes. Their letters come after the notes (below).
+      const marks = (p.blocks ?? []).filter((m) => m.endBeat >= visFrom && m.startBeat <= visTo)
+      for (const m of marks) {
+        const hue = (m.patternId * 67) % 360
+        const yTop = Math.max(0, yOf(m.endBeat))
+        const yBot = Math.min(hitY, yOf(m.startBeat))
+        if (yBot > yTop) {
+          ctx.fillStyle = `hsla(${hue}, 60%, 55%, ${m.nth === 1 ? 0.95 : 0.5})`
+          ctx.fillRect(0, yTop, 4, yBot - yTop)
+        }
+        const y = yOf(m.startBeat)
+        if (y < 0 || y > hitY) continue
+        ctx.fillStyle = `hsla(${hue}, 70%, 62%, 0.5)`
+        ctx.fillRect(0, y - 1, w, 2)
+      }
+
       // Events.
       const evs = p.events
       const browsing = Math.abs(offset) > 1e-3
+      const noteBoxes: Box[] = [] // where notes are drawn: the loop letters keep clear of them
       const sounding = new Set<number>() // what sounds at the play position (or, browsing, on the hit line)
-      ctx.font = '700 12px var(--sans, system-ui)'
+      ctx.font = font(700, 12)
       for (const e of evs) {
         const at = browsing ? now : real
         if (e.start <= at + 0.02 && e.start + e.dur > at - 0.02) sounding.add(e.lane)
-        if (e.start > visTo) continue
+        // A little past the top too: a loop letter's row reaches above its line, and a note just
+        // above the view must keep it from hopping sideways as it comes in.
+        if (e.start > visTo + 24 / ppb) continue
         if (e.start + e.dur < visFrom) continue
         const kg = geo[e.lane]
         if (!kg) continue
@@ -342,6 +435,7 @@ export function Waterfall(props: Props) {
         const grade = st.grades.get(e.i)
         ctx.globalAlpha = done ? 0.25 : 1
         ctx.fillStyle = grade === 'miss' ? '#5b2a2a' : e.color
+        noteBoxes.push({ x, y: yBottom - hh, w: ww, h: hh })
         roundRect(ctx, x, yBottom - hh, ww, hh, 5)
         ctx.fill()
         // A held long note glows from its start up to where the key is (or was) let go; the
@@ -385,6 +479,63 @@ export function Waterfall(props: Props) {
         ctx.globalAlpha = 1
       }
 
+      // The loop letters — new, the n-th time, or a near copy — just above each block's start
+      // line, in the first spot from the left (after the bar number) clear of the notes and of
+      // the labels drawn next («здесь остановились», the picked stretch, the way back).
+      if (marks.length) {
+        ctx.font = font(700, 12)
+        const ph = 19
+        const labels: Box[] = []
+        if (browsing) {
+          labels.push({ x: 30, y: yOf(real) - 20, w: ctx.measureText('здесь остановились').width + 6, h: 20 })
+          labels.push({ x: w - 190, y: 6, w: 190, h: 32 })
+        }
+        if (drag) {
+          // Only the «Учить: …» label of the stretch being picked (drawn below, same geometry).
+          const r = snapSelection(g, drag.a, drag.moved ? drag.b : drag.a, drag.fine)
+          const y0 = Math.max(0, yOf(r.end))
+          if (Math.min(hitY, yOf(r.start)) > y0) {
+            ctx.font = font(700, 14)
+            const tw = ctx.measureText(`Учить: ${rangeLabel(g, r)}`).width
+            labels.push({ x: w / 2 - tw / 2 - 10, y: Math.max(4, y0 + 6), w: tw + 20, h: 24 })
+            ctx.font = font(700, 12)
+          }
+        }
+        for (const m of marks) {
+          const y = yOf(m.startBeat)
+          if (y < 0 || y > hitY) continue
+          const hue = (m.patternId * 67) % 360
+          const text = blockMarkText(m)
+          const bw = ctx.measureText(text).width + 12
+          const py = y - ph - 4
+          const taken = [...noteBoxes, ...labels]
+            .filter((b) => b.y < py + ph && b.y + b.h > py)
+            .map((b): [number, number] => [b.x, b.x + b.w])
+          const px = freeSpot(taken, 30, bw, w - 4) ?? 30
+          ctx.fillStyle = `hsla(${hue}, 45%, 18%, 0.94)`
+          roundRect(ctx, px, py, bw, ph, 5)
+          ctx.fill()
+          ctx.strokeStyle = `hsla(${hue}, 50%, 45%, 0.9)`
+          ctx.lineWidth = 1
+          ctx.stroke()
+          ctx.fillStyle = `hsl(${hue}, 80%, 82%)`
+          ctx.fillText(text, px + 6, py + 14)
+          labels.push({ x: px, y: py, w: bw, h: ph })
+        }
+      }
+
+      // The hover hint names the block under the pointer while stopped (none over moving notes).
+      let title = ''
+      if (p.interactive && pointerY !== null && pointerY >= 0 && pointerY <= hitY && p.blocks) {
+        const beat = yToBeat(pointerY)
+        const m = p.blocks.find((b) => beat >= b.startBeat && beat < b.endBeat)
+        if (m) title = blockMarkTitle(g, m)
+      }
+      if (title !== lastTitle) {
+        lastTitle = title
+        el.title = title
+      }
+
       // Scrolled away from the play position: mark where it is.
       if (Math.abs(offset) > 1e-3) {
         const y = yOf(real)
@@ -398,7 +549,7 @@ export function Waterfall(props: Props) {
           ctx.stroke()
           ctx.setLineDash([])
           ctx.fillStyle = 'rgba(111,168,255,0.95)'
-          ctx.font = '700 12px var(--sans, system-ui)'
+          ctx.font = font(700, 12)
           ctx.fillText('здесь остановились', 30, y - 5)
         }
       }
@@ -414,7 +565,7 @@ export function Waterfall(props: Props) {
           ctx.strokeStyle = 'rgba(111,168,255,0.9)'
           ctx.lineWidth = 2
           ctx.strokeRect(1, y0 + 1, w - 2, y1 - y0 - 2)
-          ctx.font = '700 14px var(--sans, system-ui)'
+          ctx.font = font(700, 14)
           const text = `Учить: ${rangeLabel(g, r)}`
           const tw = ctx.measureText(text).width
           ctx.fillStyle = 'rgba(111,168,255,0.95)'
@@ -455,10 +606,10 @@ export function Waterfall(props: Props) {
         if (!keys) {
           ctx.fillStyle = exp || pressed ? '#111' : (p.lanes.colors[i] ?? '#ccc')
           ctx.textAlign = 'center'
-          ctx.font = '700 13px var(--sans, system-ui)'
+          ctx.font = font(700, 13)
           const [padName, ...rest] = (p.lanes.labels[i] ?? '').split(' ')
           ctx.fillText(padName, kg.x + kg.w / 2, kg.y + 26)
-          ctx.font = '600 12px var(--sans, system-ui)'
+          ctx.font = font(600, 12)
           ctx.fillText(rest.join(' '), kg.x + kg.w / 2, kg.y + 46)
           ctx.textAlign = 'left'
         }
@@ -467,7 +618,7 @@ export function Waterfall(props: Props) {
       for (const kg of geo) if (kg.black) drawLane(kg)
       if (keys) {
         // C labels on the keyboard, for orientation at the track's OCT setting.
-        ctx.font = '600 11px var(--sans, system-ui)'
+        ctx.font = font(600, 11)
         ctx.textAlign = 'center'
         for (const kg of geo) {
           const pitch = p.lanes.lowNote + 12 * p.octave + kg.index
@@ -484,7 +635,7 @@ export function Waterfall(props: Props) {
       if (p.interactive) {
         if (Math.abs(offset) > 1e-3) {
           const text = '↩ к месту остановки'
-          ctx.font = '700 12px var(--sans, system-ui)'
+          ctx.font = font(700, 12)
           const tw = ctx.measureText(text).width
           backPill = { x: w - tw - 30, y: 10, w: tw + 20, h: 24 }
           ctx.fillStyle = 'rgba(111,168,255,0.95)'
@@ -495,17 +646,24 @@ export function Waterfall(props: Props) {
         }
       }
 
-      // Feedback flashes.
+      // Feedback flashes (a chord's words once, stacked: see groupFlashes), kept on the canvas.
       st.flashes = st.flashes.filter((f) => nowMs - f.t < 700)
       ctx.textAlign = 'center'
-      ctx.font = '800 15px var(--sans, system-ui)'
+      ctx.font = font(800, 15)
+      const flashes: Flash[] = []
       for (const f of st.flashes) {
         const kg = geo[f.lane]
-        if (!kg) continue
-        const age = (nowMs - f.t) / 700
-        ctx.globalAlpha = 1 - age
-        ctx.fillStyle = f.color
-        ctx.fillText(f.text, kg.x + kg.w / 2, hitY - 12 - age * 30)
+        if (kg) flashes.push({ x: kg.x + kg.w / 2, text: f.text, color: f.color, t: f.t })
+      }
+      const maxW = Math.max(60, Math.min(220, w / 3))
+      for (const s of groupFlashes(flashes)) {
+        const age = (nowMs - s.t) / 700
+        ctx.globalAlpha = Math.max(0, 1 - age)
+        s.lines.forEach((l, k) => {
+          const half = Math.min(maxW, ctx.measureText(l.text).width) / 2
+          ctx.fillStyle = l.color
+          ctx.fillText(l.text, Math.min(w - half - 2, Math.max(half + 2, s.x)), hitY - 12 - age * 30 - k * 18, maxW)
+        })
       }
       ctx.globalAlpha = 1
       ctx.textAlign = 'left'
@@ -521,6 +679,7 @@ export function Waterfall(props: Props) {
       el.removeEventListener('pointermove', onMove)
       el.removeEventListener('pointerup', onUp)
       el.removeEventListener('pointercancel', onCancel)
+      el.removeEventListener('pointerleave', onLeave)
     }
   }, [])
 

@@ -17,7 +17,7 @@ import { exportPartMidi, exportStretchMidi } from '../music/exportMidi'
 import { exportOrigin, inStretch } from '../music/grid'
 import { buildLessonModel, buildPartModel, layerBlocks, type PartModel } from '../music/model'
 import { noteName } from '../music/notes'
-import { mainUnit, type PatternAnalysis } from '../music/patterns'
+import { blockMarks, mainUnit, type PatternAnalysis } from '../music/patterns'
 import { useLesson } from '../state/lesson'
 import { useOctaveNames, useProfile, useSettings } from '../state/settings'
 import { tutorTrack, type TutorTrack } from '../tutorial/events'
@@ -537,6 +537,8 @@ export function TutorialView({
     setCustom(null)
   })
   const main = patterns ? mainUnit(patterns) : null
+  // The same blocks, marked on the note view: letters, where each starts, new or a repeat.
+  const marks = useMemo(() => (patterns ? blockMarks(patterns) : []), [patterns])
   const unitSel = custom ? null : unit ?? main?.index ?? 'all'
   const selLo = typeof unitSel === 'number' ? Math.min(unitSel, unitEnd ?? unitSel) : null
   const selHi = typeof unitSel === 'number' ? Math.max(unitSel, unitEnd ?? unitSel) : null
@@ -858,6 +860,7 @@ export function TutorialView({
               bounds={whole}
               resetKey={`${mode}:${loopKey}:${track.layerIndex}:${snap?.playing ? 1 : 0}:${snap?.stepIndex ?? 0}`}
               onZoom={(f) => setZoom((z) => Math.max(0.5, Math.min(2.5, Math.round(z * f * 10) / 10)))}
+              blocks={marks}
             />
             {mode === 'prepare' && (
               <div className="overlay-tip">
@@ -897,7 +900,7 @@ export function TutorialView({
           <div className="wf-hint">
             {snap?.playing
               ? 'Пробел — пауза; на паузе ленту можно листать и выбирать кусок.'
-              : 'Колёсико над лентой (или щелчок по ней и ↑ ↓) — листать · двойной щелчок по такту или протяжка мышью — выбрать кусок · Ctrl + колёсико — масштаб'}
+              : 'Буквы слева — петли: одинаковые буквы — одинаковая музыка · колёсико (или щелчок и ↑ ↓) — листать · двойной щелчок по такту или протяжка — выбрать кусок · Ctrl + колёсико — масштаб'}
           </div>
 
           <div className="transport">
