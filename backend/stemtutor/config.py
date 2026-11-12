@@ -39,6 +39,11 @@ class AppConfig:
     def models_dir(self) -> Path:
         return self.data_dir / "models"
 
+    @property
+    def ai_file(self) -> Path:
+        """The user's OpenRouter key and model for the AI producer (never sent to the UI)."""
+        return self.data_dir / "ai.json"
+
 
 def load_config(data_dir: Path | str | None = None) -> AppConfig:
     data = Path(data_dir or os.environ.get("STEMTUTOR_DATA") or default_data_dir())

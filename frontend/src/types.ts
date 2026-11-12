@@ -116,6 +116,69 @@ export interface Settings {
   }
 }
 
+/** The AI producer connection (the key itself never leaves the backend). */
+export interface AiStatus {
+  configured: boolean
+  keyHint: string | null
+  model: string | null
+}
+
+/** A model OpenRouter can call with a JSON schema. Prices: USD per 1M tokens. */
+export interface AiModel {
+  id: string
+  name: string
+  contextLength: number | null
+  promptPrice: number | null
+  completionPrice: number | null
+  audioPrice: number | null
+  audioInput: boolean
+}
+
+export interface AiCheck {
+  ok: boolean
+  label: string | null
+  limitRemaining: number | null
+  usage: number | null
+  isFreeTier: boolean | null
+}
+
+export interface ProducerTrack {
+  id: string
+  include: boolean
+  name: string
+  what: string
+  instrument: string
+  sound: string
+  simplify: string
+}
+
+export interface ProducerResult {
+  summary: string
+  tracks: ProducerTrack[]
+  order: string[]
+  loopTips: { id: string; tip: string }[]
+  tips: string[]
+}
+
+/** The saved answer of the AI producer for a lesson (backend: lessons/<id>/cover/producer.json). */
+export interface ProducerAnswer {
+  model: string
+  createdAt: string
+  digestKey: string
+  audio: boolean
+  usage: { cost: number | null; promptTokens: number | null; completionTokens: number | null }
+  result: ProducerResult
+}
+
+export interface ProducerRequest {
+  digest: Record<string, unknown>
+  digestKey: string
+  trackIds: string[]
+  loopIds: string[]
+  audio: { start: number; duration: number } | null
+  model?: string
+}
+
 export interface Health {
   ok: boolean
   version: string

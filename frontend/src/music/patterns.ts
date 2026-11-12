@@ -29,9 +29,25 @@ export interface PatternAnalysis {
   unitBars: number
   units: PatternUnit[]
   patterns: Pattern[]
+  /** The pattern of a lead-in bar split off before the phrases (analyzeBlocks), if any. */
+  leadIn?: number
 }
 
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+/**
+ * The block that repeats most often (the main loop of the part), or the first non-empty one —
+ * past a lead-in bar (a pickup is never the main loop).
+ */
+export function mainUnit(p: PatternAnalysis): PatternUnit | null {
+  let best: { u: PatternUnit; n: number } | null = null
+  for (const pat of p.patterns) {
+    const u = p.units[pat.units[0]]
+    if (u && (!best || pat.units.length > best.n)) best = { u, n: pat.units.length }
+  }
+  if (best && best.n >= 2) return best.u
+  return p.units.find((u) => !u.empty && u.patternId !== p.leadIn) ?? p.units.find((u) => !u.empty) ?? null
+}
 
 function barTokens(events: PatternEvent[], grid: Grid, firstBar: number, lastBar: number, steps: number): string[][] {
   const bars: string[][] = []
@@ -164,4 +180,54 @@ export function analyzePatterns(
     units.push(unit)
   }
   return { unitBars: bestL, units, patterns }
+}
+
+/**
+ * The blocks of a part as the learner sees them — one analysis for the trainer, the lesson
+ * page and the cover plan, so their letters always agree. Like analyzePatterns over
+ * [firstBar, lastBar], except that the first bar may stand alone: a pickup, a fill or a ghost
+ * note a 16th early would otherwise shift every phrase by a bar and split a 4-bar loop into
+ * 1-bar pieces. Whichever way leaves fewer bars to learn wins; on a tie, the one with fewer
+ * loops (longer ones, fewer clips to place); still tied — no lead-in. The lead-in gets the
+ * next free letter, so A stays the first real loop.
+ */
+export function analyzeBlocks(
+  events: PatternEvent[],
+  grid: Grid,
+  firstBar: number,
+  lastBar: number,
+  stepsPerBeat = 4,
+  tolerance = 1,
+  unitBars?: number,
+): PatternAnalysis {
+  const plain = analyzePatterns(events, grid, firstBar, lastBar, stepsPerBeat, tolerance, unitBars)
+  if (lastBar - firstBar < 2) return plain
+  const rest = analyzePatterns(events, grid, firstBar + 1, lastBar, stepsPerBeat, tolerance, unitBars)
+  const leadNotes = events.some((e) => noteBar(grid, e.start) === firstBar)
+  const toLearn = (p: PatternAnalysis) => p.patterns.length * p.unitBars
+  const leadCost = toLearn(rest) + (leadNotes ? 1 : 0)
+  const leadLoops = rest.patterns.length + (leadNotes ? 1 : 0)
+  if (leadCost > toLearn(plain) || (leadCost === toLearn(plain) && leadLoops >= plain.patterns.length)) return plain
+  const lead: PatternUnit = {
+    index: 0,
+    startBar: firstBar,
+    bars: 1,
+    startBeat: barStartBeat(grid, firstBar),
+    endBeat: barStartBeat(grid, firstBar + 1),
+    patternId: -1,
+    label: '—',
+    empty: !leadNotes,
+  }
+  const units = [lead, ...rest.units.map((u) => ({ ...u, index: u.index + 1 }))]
+  const patterns = rest.patterns.map((p) => ({ ...p, units: p.units.map((i) => i + 1) }))
+  if (leadNotes) {
+    const id = patterns.length
+    const base = patterns.filter((p) => p.variantOf === null).length
+    const label = LETTERS[base] ?? `P${base + 1}`
+    lead.patternId = id
+    lead.label = label
+    patterns.push({ id, label, units: [0], variantOf: null })
+    return { unitBars: rest.unitBars, units, patterns, leadIn: id }
+  }
+  return { unitBars: rest.unitBars, units, patterns }
 }

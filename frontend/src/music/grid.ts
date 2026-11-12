@@ -64,6 +64,14 @@ export function noteBar(grid: Grid, beat: number): number {
   return barOfBeat(grid, beat + 0.06)
 }
 
+/**
+ * Does a note starting at `beat` belong to a stretch? The same rule as noteBar: a note less
+ * than a 64th before the stretch is its downbeat, one that close to its end is the next one's.
+ */
+export function inStretch(beat: number, range: { start: number; end: number }): boolean {
+  return beat + 0.06 >= range.start - EPS && beat + 0.06 < range.end - EPS
+}
+
 export function barStartBeat(grid: Grid, bar: number): number {
   return grid.firstDownbeat + bar * grid.barLength
 }

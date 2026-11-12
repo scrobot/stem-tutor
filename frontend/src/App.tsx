@@ -3,6 +3,9 @@ import { BrowserRouter, Link, NavLink, Route, Routes } from 'react-router-dom'
 import { resumeAudio } from './audio/engine'
 import { matchProfile, profileById } from './instruments/profiles'
 import { useMidi, type MidiPortInfo } from './midi/midi'
+import { BuiltinLessonPage, BuiltinTutorialPage, ChordsCatalogPage } from './pages/ChordsPage'
+import CoverPage from './pages/CoverPage'
+import GlossaryPage from './pages/GlossaryPage'
 import InstrumentPage from './pages/InstrumentPage'
 import LessonPage from './pages/LessonPage'
 import LibraryPage from './pages/LibraryPage'
@@ -68,9 +71,11 @@ export default function App() {
         </Link>
         <nav>
           <NavLink to="/" end>
-            Уроки
+            Мои треки
           </NavLink>
-          <NavLink to="/instrument">Инструмент</NavLink>
+          <NavLink to="/learn">Аккорды и разминка</NavLink>
+          <NavLink to="/instrument">Клавиатура</NavLink>
+          <NavLink to="/help">Словарик</NavLink>
         </nav>
         <MidiStatus />
       </header>
@@ -84,7 +89,12 @@ export default function App() {
             <Route path="/" element={<LibraryPage />} />
             <Route path="/instrument" element={<InstrumentPage />} />
             <Route path="/lesson/:id" element={<LessonPage />} />
+            <Route path="/lesson/:id/cover" element={<CoverPage />} />
             <Route path="/lesson/:id/part/:partId" element={<TutorialPage />} />
+            <Route path="/learn" element={<ChordsCatalogPage />} />
+            <Route path="/learn/:lessonId" element={<BuiltinLessonPage />} />
+            <Route path="/learn/:lessonId/:exId" element={<BuiltinTutorialPage />} />
+            <Route path="/help" element={<GlossaryPage />} />
             <Route path="*" element={<LibraryPage />} />
           </Routes>
         )}

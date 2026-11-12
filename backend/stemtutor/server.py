@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -13,16 +14,17 @@ from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__
+from . import __version__, learned, producer
 from .config import AppConfig, load_config
 from .gridmath import export_origin
 from .jobs import JobRunner, reset_for_run
 from .pipeline import ffmpeg
-from .schemas import Lesson, LessonPatch, LessonSummary, Settings, SourceInfo
+from .schemas import AiSettingsPatch, Lesson, LessonPatch, LessonSummary, ProducerRequest, Settings, SourceInfo
 from .storage import LessonRepo, NotFound, SettingsStore, safe_filename, slugify
 
 MEDIA_TYPES = {
@@ -159,6 +161,8 @@ def create_app(cfg: AppConfig | None = None, synchronous_jobs: bool = False) -> 
     settings = SettingsStore(cfg.settings_file)
     runner = JobRunner(repo, cfg, synchronous=synchronous_jobs)
     probe = EngineProbe()
+    ai = producer.AiStore(cfg.ai_file)
+    ai_models = producer.ModelsCache()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -172,6 +176,10 @@ def create_app(cfg: AppConfig | None = None, synchronous_jobs: bool = False) -> 
     app.state.repo = repo
     app.state.runner = runner
     app.state.cfg = cfg
+
+    @app.exception_handler(producer.ProducerError)
+    async def producer_error(_request, exc: producer.ProducerError) -> JSONResponse:
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status)
 
     def get_lesson(lesson_id: str) -> Lesson:
         try:
@@ -377,6 +385,78 @@ def create_app(cfg: AppConfig | None = None, synchronous_jobs: bool = False) -> 
             ffmpeg.align_to_wav(src, out, -origin_time)
             tmp_mix.unlink(missing_ok=True)
         return FileResponse(out, media_type="audio/wav", filename=out.name)
+
+    # -- AI producer (the user's own OpenRouter key) --------------------------------------
+    @app.get("/api/ai")
+    def get_ai() -> dict:
+        """Whether a key is saved: a masked hint only, the key itself never leaves the backend."""
+        return producer.public_settings(ai.get())
+
+    @app.put("/api/ai")
+    def put_ai(body: AiSettingsPatch) -> dict:
+        """Absent fields stay as they are; null or "" clears a field."""
+        changes: dict[str, str | None] = {}
+        if "key" in body.model_fields_set:
+            changes["key"] = producer.clean_key(body.key)
+        if "model" in body.model_fields_set:
+            changes["model"] = producer.clean_model(body.model)
+        saved = ai.update(**changes)
+        if "key" in changes:
+            ai_models.clear()
+        return producer.public_settings(saved)
+
+    @app.get("/api/ai/check")
+    def check_ai() -> dict:
+        """Ask OpenRouter about the saved key (label, credit left)."""
+        return producer.check_key(ai.get().key)
+
+    @app.get("/api/ai/models")
+    def list_ai_models() -> dict:
+        """Models that can answer by a JSON schema (cached for 10 minutes)."""
+        return {"models": ai_models.get(ai.get().key)}
+
+    @app.get("/api/lessons/{lesson_id}/cover/producer")
+    def read_producer(lesson_id: str) -> dict:
+        get_lesson(lesson_id)
+        answer = producer.load_answer(repo, lesson_id)
+        if answer is None:
+            raise HTTPException(404, "ИИ-план ещё не составлен.")
+        return answer
+
+    @app.post("/api/lessons/{lesson_id}/cover/producer")
+    def ask_producer(lesson_id: str, body: ProducerRequest) -> dict:
+        """Ask the user's model to refine the cover plan; the sanitized answer is saved."""
+        lesson = get_lesson(lesson_id)
+        return producer.ask(repo, lesson, ai.get(), body)
+
+    @app.delete("/api/lessons/{lesson_id}/cover/producer", status_code=204)
+    def delete_producer(lesson_id: str) -> None:
+        get_lesson(lesson_id)
+        producer.delete_answer(repo, lesson_id)
+
+    def save_learned(lesson_id: str, raw: bytes) -> dict:
+        get_lesson(lesson_id)
+        try:
+            mark = learned.clean_mark(json.loads(raw)) if raw else None
+        except (ValueError, RecursionError):  # not JSON (or not UTF-8)
+            mark = None
+        if mark is None:
+            raise HTTPException(400, learned.BAD_MARK)
+
+        def apply(lesson: Lesson) -> None:
+            lesson.prefs["coverLearned"] = learned.merge(lesson.prefs.get("coverLearned"), mark)
+
+        try:
+            lesson = repo.update(lesson_id, apply)
+        except NotFound:
+            raise HTTPException(404, "Урок не найден")
+        return {"coverLearned": lesson.prefs["coverLearned"]}
+
+    @app.post("/api/lessons/{lesson_id}/cover/learned")
+    async def mark_learned(lesson_id: str, request: Request) -> dict:
+        """One "learned" mark from the trainer, merged under the storage lock (several tabs may
+        be open). The body is checked by hand, so a bad mark is a plain 400, never a 422."""
+        return await run_in_threadpool(save_learned, lesson_id, await request.body())
 
     # -- web UI --------------------------------------------------------------------------
     dist = cfg.frontend_dist

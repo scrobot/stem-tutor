@@ -1,12 +1,17 @@
 /**
- * Falling-notes view (canvas). Lanes are the controller's keys (drawn as a real keyboard)
- * or the used pads. Time flows top → bottom in beats; the hit line sits on the keyboard.
+ * Falling-notes view (canvas) — a piano roll turned on its side: every note is a bar as long as
+ * the note lasts, falling onto the key that plays it. Lanes are the controller's keys (drawn as
+ * a real keyboard) or the used pads. Time flows top → bottom in beats; the hit line sits on
+ * the keyboard.
+ *
+ * While playback is stopped the view can be scrolled with the wheel or the arrow keys (up = what
+ * comes next) and a stretch to practise can be picked right on the notes: a double-click picks
+ * one bar, a drag picks bars (with Alt: whole beats). A plain click only focuses the view.
  * Everything per-frame lives in refs so React never re-renders at 60 fps.
  */
 import { useEffect, useRef, type MutableRefObject } from 'react'
 import { keyboardGeometry, type KeyGeom } from '../instruments/layout'
-import type { OctaveChange } from '../music/arrange'
-import { barStartBeat } from '../music/grid'
+import { barOfBeat, barStartBeat } from '../music/grid'
 import { noteName, type OctaveNames } from '../music/notes'
 import type { TutorEvent, TutorLanes } from '../tutorial/events'
 import type { Grid } from '../types'
@@ -39,17 +44,62 @@ export function newWaterfallState(): WaterfallState {
   }
 }
 
+export interface BeatRange {
+  start: number
+  end: number
+}
+
+/**
+ * The stretch a click or a drag from beat `a` to beat `b` picks: the bars it touches (at least
+ * one), or with `fine` the whole beats it touches.
+ */
+export function snapSelection(grid: Grid, a: number, b: number, fine = false): BeatRange {
+  const lo = Math.min(a, b)
+  const hi = Math.max(a, b)
+  if (fine) {
+    const start = Math.floor(lo + 1e-6)
+    return { start, end: Math.max(start + 1, Math.ceil(hi - 1e-6)) }
+  }
+  const b0 = barOfBeat(grid, lo)
+  const b1 = Math.max(b0, barOfBeat(grid, hi - 1e-6))
+  return { start: barStartBeat(grid, b0), end: barStartBeat(grid, b1 + 1) }
+}
+
+/** "такт 5" / "такты 5–8" / "такт 5, доли 2–3" for a picked stretch. */
+export function rangeLabel(grid: Grid, r: BeatRange): string {
+  const b0 = barOfBeat(grid, r.start + 1e-6)
+  const b1 = barOfBeat(grid, r.end - 1e-6)
+  const whole = Math.abs(r.start - barStartBeat(grid, b0)) < 1e-6 && Math.abs(r.end - barStartBeat(grid, b1 + 1)) < 1e-6
+  if (whole) return b0 === b1 ? `такт ${b0 + 1}` : `такты ${b0 + 1}–${b1 + 1}`
+  const beatIn = (beat: number, bar: number) => Math.round((beat - barStartBeat(grid, bar)) * 100) / 100 + 1
+  if (b0 === b1) {
+    const s = beatIn(r.start, b0)
+    const e = beatIn(r.end, b0) - 1
+    return s === e ? `такт ${b0 + 1}, доля ${s}` : `такт ${b0 + 1}, доли ${s}–${e}`
+  }
+  return `с такта ${b0 + 1} (доля ${beatIn(r.start, b0)}) до такта ${b1 + 1}`
+}
+
 interface Props {
   lanes: TutorLanes
   events: TutorEvent[]
   grid: Grid
   getNow: () => number
   state: MutableRefObject<WaterfallState>
-  changes: OctaveChange[]
-  loop: { start: number; end: number } | null
-  octaveAt: (beat: number) => number
+  loop: BeatRange | null
+  /** The OCT setting the keys are drawn for (one per practice track). */
+  octave: number
   names: OctaveNames
   zoom: number
+  /** Stopped: the wheel scrolls the view and a click or drag over the notes picks bars. */
+  interactive?: boolean
+  onSelect?: (range: BeatRange) => void
+  /** Scrolling stays within these beats. */
+  bounds?: BeatRange
+  /** The view jumps back to the play position whenever this changes. */
+  resetKey?: string
+  /** Ctrl + wheel: zoom by this factor. */
+  onZoom?: (factor: number) => void
 }
 
 const GRADE_COLOR: Record<Grade, string> = { perfect: '#5bd6a7', good: '#9be37a', ok: '#ffd36b', miss: '#ff6b6b' }
@@ -63,6 +113,15 @@ function roundRect(g: CanvasRenderingContext2D, x: number, y: number, w: number,
   g.arcTo(x, y + h, x, y, rr)
   g.arcTo(x, y, x + w, y, rr)
   g.closePath()
+}
+
+interface Drag {
+  a: number
+  b: number
+  y0: number
+  moved: boolean
+  fine: boolean
+  id: number
 }
 
 export function Waterfall(props: Props) {
@@ -89,6 +148,98 @@ export function Waterfall(props: Props) {
     ro.observe(el)
     resize()
 
+    // View state shared by the frame loop and the pointer handlers.
+    let offset = 0 // beats the view is scrolled ahead (+) or back (−) of the play position
+    let lastReset: string | undefined = propsRef.current.resetKey
+    let drag: Drag | null = null
+    const geom = { hitY: 0, ppb: 1, view: 0, real: 0 }
+    let backPill: { x: number; y: number; w: number; h: number } | null = null
+
+    const yToBeat = (y: number) => geom.view + (geom.hitY - y) / geom.ppb
+    const localY = (e: PointerEvent | WheelEvent) => e.clientY - el.getBoundingClientRect().top
+    const localX = (e: PointerEvent) => e.clientX - el.getBoundingClientRect().left
+    const clampOffset = (o: number) => {
+      const b = propsRef.current.bounds
+      if (!b) return o
+      const lo = b.start - 2 - geom.real
+      const hi = Math.max(lo, b.end - geom.real)
+      return Math.max(lo, Math.min(hi, o))
+    }
+
+    const onWheel = (e: WheelEvent) => {
+      const p = propsRef.current
+      if (e.ctrlKey && p.onZoom) {
+        e.preventDefault()
+        p.onZoom(e.deltaY < 0 ? 1.1 : 1 / 1.1)
+        return
+      }
+      if (!p.interactive) return
+      e.preventDefault()
+      const px = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaMode === 2 ? e.deltaY * h : e.deltaY
+      offset = clampOffset(offset - px / geom.ppb)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      const p = propsRef.current
+      if (!p.interactive) return
+      const bar = p.grid.barLength
+      const step = e.key === 'ArrowUp' ? bar : e.key === 'ArrowDown' ? -bar : e.key === 'PageUp' ? 4 * bar : e.key === 'PageDown' ? -4 * bar : 0
+      if (step) {
+        e.preventDefault()
+        offset = clampOffset(offset + step)
+      } else if (e.key === 'Home') {
+        e.preventDefault()
+        offset = 0
+      }
+    }
+    const onDown = (e: PointerEvent) => {
+      const p = propsRef.current
+      if (!p.interactive || e.button !== 0) return
+      const x = localX(e)
+      const y = localY(e)
+      if (backPill && x >= backPill.x && x <= backPill.x + backPill.w && y >= backPill.y && y <= backPill.y + backPill.h) {
+        offset = 0
+        return
+      }
+      if (y > geom.hitY || !p.onSelect) return
+      const beat = yToBeat(y)
+      drag = { a: beat, b: beat, y0: y, moved: false, fine: e.altKey, id: e.pointerId }
+      el.setPointerCapture(e.pointerId)
+    }
+    const onMove = (e: PointerEvent) => {
+      if (!drag || e.pointerId !== drag.id) return
+      const y = localY(e)
+      drag.b = yToBeat(Math.max(0, Math.min(geom.hitY, y)))
+      drag.fine = e.altKey
+      if (Math.abs(y - drag.y0) > 5) drag.moved = true
+    }
+    const onUp = (e: PointerEvent) => {
+      if (!drag || e.pointerId !== drag.id) return
+      const d = drag
+      drag = null
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId)
+      const p = propsRef.current
+      // A plain click only focuses the view (picking a stretch would end a paused run).
+      if (!d.moved || !p.interactive || !p.onSelect) return
+      p.onSelect(snapSelection(p.grid, d.a, d.b, d.fine))
+    }
+    const onDouble = (e: MouseEvent) => {
+      const p = propsRef.current
+      const y = e.clientY - el.getBoundingClientRect().top
+      if (!p.interactive || !p.onSelect || y > geom.hitY) return
+      const beat = yToBeat(y)
+      p.onSelect(snapSelection(p.grid, beat, beat, e.altKey))
+    }
+    const onCancel = () => {
+      drag = null
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    el.addEventListener('keydown', onKey)
+    el.addEventListener('dblclick', onDouble)
+    el.addEventListener('pointerdown', onDown)
+    el.addEventListener('pointermove', onMove)
+    el.addEventListener('pointerup', onUp)
+    el.addEventListener('pointercancel', onCancel)
+
     let keyCache: { key: string; geo: KeyGeom[] } | null = null
     const laneGeo = (p: Props, kbTop: number, kbH: number): KeyGeom[] => {
       const k = `${p.lanes.kind}:${p.lanes.count}:${p.lanes.lowNote}:${w}:${kbTop}:${kbH}`
@@ -110,13 +261,20 @@ export function Waterfall(props: Props) {
       raf = requestAnimationFrame(draw)
       const p = propsRef.current
       const st = p.state.current
-      const now = p.getNow()
+      const real = p.getNow()
+      if (!p.interactive || p.resetKey !== lastReset) {
+        offset = 0
+        lastReset = p.resetKey
+        if (!p.interactive) drag = null
+      }
+      const now = real + offset
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.clearRect(0, 0, w, h)
       const keys = p.lanes.kind === 'keys'
       const kbH = keys ? Math.max(80, Math.min(150, h * 0.24)) : 78
       const hitY = h - kbH - 6
       const ppb = (hitY / 8) * p.zoom // pixels per beat: ~8 beats visible at zoom 1
+      Object.assign(geom, { hitY, ppb, view: now, real })
       const yOf = (beat: number) => hitY - (beat - now) * ppb
       const geo = laneGeo(p, hitY + 6, kbH)
       const visFrom = now - (kbH + 6) / ppb
@@ -164,36 +322,15 @@ export function Waterfall(props: Props) {
         }
       }
 
-      // Octave change markers.
-      for (const c of p.changes) {
-        const y = yOf(c.beat)
-        if (y < -20 || y > hitY + 4) continue
-        ctx.strokeStyle = '#ffb547'
-        ctx.setLineDash([8, 6])
-        ctx.lineWidth = 2
-        ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(w, y)
-        ctx.stroke()
-        ctx.setLineDash([])
-        const up = c.to > c.from
-        const n = Math.abs(c.to - c.from)
-        const text = `${up ? '▲ OCT +' : '▼ OCT −'} ×${n}  →  OCT ${c.to > 0 ? '+' : ''}${c.to}`
-        ctx.font = '700 14px var(--sans, system-ui)'
-        const tw = ctx.measureText(text).width
-        ctx.fillStyle = '#ffb547'
-        roundRect(ctx, w - tw - 28, y - 26, tw + 18, 22, 6)
-        ctx.fill()
-        ctx.fillStyle = '#111'
-        ctx.fillText(text, w - tw - 19, y - 10)
-      }
-
       // Events.
       const evs = p.events
-      const sounding = new Set<number>()
+      const browsing = Math.abs(offset) > 1e-3
+      const sounding = new Set<number>() // what sounds at the play position (or, browsing, on the hit line)
       ctx.font = '700 12px var(--sans, system-ui)'
       for (const e of evs) {
-        if (e.start > visTo) break
+        const at = browsing ? now : real
+        if (e.start <= at + 0.02 && e.start + e.dur > at - 0.02) sounding.add(e.lane)
+        if (e.start > visTo) continue
         if (e.start + e.dur < visFrom) continue
         const kg = geo[e.lane]
         if (!kg) continue
@@ -203,7 +340,6 @@ export function Waterfall(props: Props) {
         const ww = kg.w - (keys ? 4 : 12)
         const done = st.done.has(e.i)
         const grade = st.grades.get(e.i)
-        if (e.start <= now + 0.02 && e.start + e.dur > now - 0.02) sounding.add(e.lane)
         ctx.globalAlpha = done ? 0.25 : 1
         ctx.fillStyle = grade === 'miss' ? '#5b2a2a' : e.color
         roundRect(ctx, x, yBottom - hh, ww, hh, 5)
@@ -212,7 +348,7 @@ export function Waterfall(props: Props) {
         // part released too early stays dark.
         const heldTo = st.held.get(e.i)
         if (heldTo !== undefined) {
-          const until = Math.min(e.start + e.dur, heldTo ?? now)
+          const until = Math.min(e.start + e.dur, heldTo ?? real)
           if (until > e.start) {
             const yTop = yOf(until)
             ctx.fillStyle = 'rgba(255,255,255,0.42)'
@@ -242,18 +378,61 @@ export function Waterfall(props: Props) {
         if (keys && hh >= 18 && ww >= 16) {
           ctx.fillStyle = 'rgba(0,0,0,0.75)'
           ctx.textAlign = 'center'
-          ctx.fillText(e.label, x + ww / 2, yBottom - 6)
+          const text = e.finger ? `${e.label}·${e.finger}` : e.label
+          ctx.fillText(ww >= 28 || !e.finger ? text : String(e.finger), x + ww / 2, yBottom - 6)
           ctx.textAlign = 'left'
         }
         ctx.globalAlpha = 1
+      }
+
+      // Scrolled away from the play position: mark where it is.
+      if (Math.abs(offset) > 1e-3) {
+        const y = yOf(real)
+        if (y >= 0 && y <= hitY) {
+          ctx.strokeStyle = 'rgba(111,168,255,0.85)'
+          ctx.setLineDash([6, 5])
+          ctx.lineWidth = 2
+          ctx.beginPath()
+          ctx.moveTo(0, y)
+          ctx.lineTo(w, y)
+          ctx.stroke()
+          ctx.setLineDash([])
+          ctx.fillStyle = 'rgba(111,168,255,0.95)'
+          ctx.font = '700 12px var(--sans, system-ui)'
+          ctx.fillText('здесь остановились', 30, y - 5)
+        }
+      }
+
+      // The stretch being picked.
+      if (drag) {
+        const r = snapSelection(g, drag.a, drag.moved ? drag.b : drag.a, drag.fine)
+        const y0 = Math.max(0, yOf(r.end))
+        const y1 = Math.min(hitY, yOf(r.start))
+        if (y1 > y0) {
+          ctx.fillStyle = 'rgba(111,168,255,0.16)'
+          ctx.fillRect(0, y0, w, y1 - y0)
+          ctx.strokeStyle = 'rgba(111,168,255,0.9)'
+          ctx.lineWidth = 2
+          ctx.strokeRect(1, y0 + 1, w - 2, y1 - y0 - 2)
+          ctx.font = '700 14px var(--sans, system-ui)'
+          const text = `Учить: ${rangeLabel(g, r)}`
+          const tw = ctx.measureText(text).width
+          ctx.fillStyle = 'rgba(111,168,255,0.95)'
+          roundRect(ctx, w / 2 - tw / 2 - 10, Math.max(4, y0 + 6), tw + 20, 24, 6)
+          ctx.fill()
+          ctx.fillStyle = '#0b0d11'
+          ctx.textAlign = 'center'
+          ctx.fillText(text, w / 2, Math.max(4, y0 + 6) + 17)
+          ctx.textAlign = 'left'
+        }
       }
 
       // Hit line.
       ctx.fillStyle = 'rgba(111,168,255,0.9)'
       ctx.fillRect(0, hitY, w, 2)
 
-      // Keyboard / pads.
-      const expected = st.expected ?? sounding
+      // Keyboard / pads. Browsing, the keys show the notes on the hit line: scrub to see a shape.
+      const expected = browsing ? sounding : st.expected ?? sounding
       const nowMs = performance.now()
       const drawLane = (kg: KeyGeom) => {
         const i = kg.index
@@ -287,18 +466,33 @@ export function Waterfall(props: Props) {
       for (const kg of geo) if (!kg.black) drawLane(kg)
       for (const kg of geo) if (kg.black) drawLane(kg)
       if (keys) {
-        // C labels on the keyboard, for orientation at the current octave.
-        const oct = p.octaveAt(now)
+        // C labels on the keyboard, for orientation at the track's OCT setting.
         ctx.font = '600 11px var(--sans, system-ui)'
         ctx.textAlign = 'center'
         for (const kg of geo) {
-          const pitch = p.lanes.lowNote + 12 * oct + kg.index
+          const pitch = p.lanes.lowNote + 12 * p.octave + kg.index
           if (!kg.black && pitch % 12 === 0) {
             ctx.fillStyle = '#5a6472'
             ctx.fillText(noteName(pitch, p.names), kg.x + kg.w / 2, kg.y + kg.h - 8)
           }
         }
         ctx.textAlign = 'left'
+      }
+
+      // The way back after scrolling (how to scroll and pick is explained under the view).
+      backPill = null
+      if (p.interactive) {
+        if (Math.abs(offset) > 1e-3) {
+          const text = '↩ к месту остановки'
+          ctx.font = '700 12px var(--sans, system-ui)'
+          const tw = ctx.measureText(text).width
+          backPill = { x: w - tw - 30, y: 10, w: tw + 20, h: 24 }
+          ctx.fillStyle = 'rgba(111,168,255,0.95)'
+          roundRect(ctx, backPill.x, backPill.y, backPill.w, backPill.h, 6)
+          ctx.fill()
+          ctx.fillStyle = '#0b0d11'
+          ctx.fillText(text, backPill.x + 10, backPill.y + 16)
+        }
       }
 
       // Feedback flashes.
@@ -320,8 +514,22 @@ export function Waterfall(props: Props) {
     return () => {
       cancelAnimationFrame(raf)
       ro.disconnect()
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('keydown', onKey)
+      el.removeEventListener('dblclick', onDouble)
+      el.removeEventListener('pointerdown', onDown)
+      el.removeEventListener('pointermove', onMove)
+      el.removeEventListener('pointerup', onUp)
+      el.removeEventListener('pointercancel', onCancel)
     }
   }, [])
 
-  return <canvas ref={canvas} className="waterfall" />
+  return (
+    <canvas
+      ref={canvas}
+      className={`waterfall ${props.interactive ? 'interactive' : ''}`}
+      tabIndex={0}
+      aria-label="Лента нот: колёсико или стрелки — листать, двойной щелчок или протяжка — выбрать такты"
+    />
+  )
 }

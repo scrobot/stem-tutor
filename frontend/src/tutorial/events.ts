@@ -1,8 +1,10 @@
 import type { InstrumentProfile } from '../instruments/profiles'
-import type { OctaveChange, OctaveSegment, PadSlot } from '../music/arrange'
+import { fitLayer, type BeatRange, type LayerKind, type PadSlot } from '../music/arrange'
 import { DRUM_COLOR, DRUM_LABEL } from '../music/drums'
+import { inStretch } from '../music/grid'
 import type { PartModel } from '../music/model'
 import { noteName, type OctaveNames } from '../music/notes'
+import { keyboardSpec } from '../instruments/profiles'
 import type { Role } from '../types'
 
 export const ROLE_HEX: Record<Role, string> = {
@@ -24,9 +26,10 @@ export interface TutorEvent {
   vel: number
   color: string
   label: string
-  octave: number
   drum: boolean
   folded: boolean
+  /** Built-in lessons: which finger plays it (1 = thumb … 5 = little finger). */
+  finger?: number
 }
 
 export interface TutorLanes {
@@ -41,14 +44,34 @@ export interface TutorLanes {
 export interface TutorTrack {
   events: TutorEvent[]
   lanes: TutorLanes
-  segments: OctaveSegment[]
-  changes: OctaveChange[]
-  startOctave: number
-  passCount: number
-  passLabel: string
+  /** The one OCT setting for the whole stretch (keys; 0 for pads). */
+  octave: number
+  /** Notes inside the stretch moved by an octave so they fit the keys. */
+  folded: number
+  layerCount: number
+  layerIndex: number
+  layerLabel: string
+  layerHint: string
+  layerKind: LayerKind | 'pads'
 }
 
-export function tutorTrack(model: PartModel, passIdx: number, profile: InstrumentProfile, names: OctaveNames): TutorTrack {
+/**
+ * What the practice session plays and grades: one layer of a part, laid on the controller for
+ * one stretch (`range`, or the whole part) with a single OCT setting.
+ */
+export function tutorTrack(
+  model: PartModel,
+  layerIdx: number,
+  profile: InstrumentProfile,
+  names: OctaveNames,
+  range?: BeatRange | null,
+  opts: {
+    /** Built-in lessons: the finger for each note of the part (by its index). */
+    fingers?: Map<number, number>
+    /** Spell black keys as flats (Eb) rather than sharps (D#) around this beat. */
+    flatsAt?: (beat: number) => boolean
+  } = {},
+): TutorTrack {
   const a = model.arrangement
   if (a.kind === 'pads') {
     const slots = a.slots
@@ -64,7 +87,6 @@ export function tutorTrack(model: PartModel, passIdx: number, profile: Instrumen
       vel: e.vel,
       color: DRUM_COLOR[e.cls],
       label: DRUM_LABEL[e.cls],
-      octave: 0,
       drum: true,
       folded: false,
     }))
@@ -78,16 +100,20 @@ export function tutorTrack(model: PartModel, passIdx: number, profile: Instrumen
         colors: slots.map((s) => DRUM_COLOR[s.cls]),
         slots,
       },
-      segments: [],
-      changes: [],
-      startOctave: 0,
-      passCount: 1,
-      passLabel: 'Вся партия',
+      octave: 0,
+      folded: 0,
+      layerCount: 1,
+      layerIndex: 0,
+      layerLabel: 'Вся партия',
+      layerHint: '',
+      layerKind: 'pads',
     }
   }
-  const pass = a.passes[Math.min(passIdx, a.passes.length - 1)]
-  const color = ROLE_HEX[model.part.role]
-  const events = (pass?.events ?? []).map<TutorEvent>((e, i) => ({
+  const index = Math.max(0, Math.min(layerIdx, a.layers.length - 1))
+  const layer = a.layers[index]
+  const fit = layer ? fitLayer(layer, keyboardSpec(profile), range) : { octave: 0, events: [], folded: 0 }
+  const color = ROLE_HEX[layer?.kind === 'bass' ? 'bass' : layer?.kind === 'melody' ? 'melody' : layer?.kind === 'chords' ? 'chords' : model.part.role]
+  const events = fit.events.map<TutorEvent>((e, i) => ({
     i,
     start: e.start,
     dur: e.dur,
@@ -96,27 +122,22 @@ export function tutorTrack(model: PartModel, passIdx: number, profile: Instrumen
     pitch: e.pitch,
     vel: e.vel,
     color,
-    label: noteName(e.pitch, names).replace(/-?\d+$/, ''),
-    octave: e.octave,
+    label: noteName(e.pitch, names, opts.flatsAt?.(e.start) ?? false).replace(/-?\d+$/, ''),
     drum: model.part.isDrum,
     folded: e.folded,
+    finger: opts.fingers?.get(e.idx),
   }))
   return {
     events,
     lanes: { kind: 'keys', count: profile.keys.count, lowNote: profile.keys.lowNote, labels: [], colors: [], slots: [] },
-    segments: pass?.segments ?? [],
-    changes: pass?.changes ?? [],
-    startOctave: pass?.startOctave ?? 0,
-    passCount: a.passes.length,
-    passLabel: pass?.label ?? '',
+    octave: fit.octave,
+    folded: fit.folded,
+    layerCount: a.layers.length,
+    layerIndex: index,
+    layerLabel: layer?.label ?? '',
+    layerHint: layer?.hint ?? '',
+    layerKind: layer?.kind ?? 'all',
   }
-}
-
-/** Octave in effect at a beat (keys parts). */
-export function octaveAt(track: TutorTrack, beat: number): number {
-  let o = track.startOctave
-  for (const s of track.segments) if (s.start <= beat + 1e-6) o = s.octave
-  return o
 }
 
 /** Onset groups for the step-by-step mode: notes that start together form one chord. */
@@ -127,7 +148,7 @@ export interface StepGroup {
 }
 
 export function stepGroups(events: TutorEvent[], from: number, to: number): StepGroup[] {
-  const list = events.filter((e) => e.start >= from - 1e-6 && e.start < to - 1e-6).sort((a, b) => a.start - b.start)
+  const list = events.filter((e) => inStretch(e.start, { start: from, end: to })).sort((a, b) => a.start - b.start)
   const out: StepGroup[] = []
   for (const e of list) {
     const g = out[out.length - 1]

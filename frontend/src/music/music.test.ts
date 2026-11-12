@@ -1,10 +1,29 @@
 import { describe, expect, it } from 'vitest'
-import type { Grid } from '../types'
-import { arrangeKeys, arrangePads, type KeyboardSpec, type PadSpec } from './arrange'
+import { BUILTIN_LESSONS, builtinLesson, chordFingers, exercisePassBars } from '../builtin/lessons'
+import { heldChordName } from '../components/ChordReadout'
+import { rangeLabel, snapSelection } from '../components/Waterfall'
+import { PROFILES } from '../instruments/profiles'
+import type { Grid, Lesson } from '../types'
+import {
+  HAND_NOTES,
+  HAND_SPAN,
+  arrangeKeys,
+  arrangePads,
+  dropGhosts,
+  fitLayer,
+  onsetGroups,
+  oneHandChord,
+  type KeyboardSpec,
+  type KeysArrangement,
+  type PadSpec,
+} from './arrange'
+import { chordFlats, chordInfo } from './explain'
+import { exportPartMidi, exportStretchMidi } from './exportMidi'
 import { barSpan, beatTime, editGrid, exportOrigin, scaleGrid, timeToBeat, uniformGrid, type BNote } from './grid'
+import { buildPartModel, layerBlocks } from './model'
 import { writeMidiFile } from './midifile'
 import { noteName } from './notes'
-import { analyzePatterns } from './patterns'
+import { analyzePatterns, mainUnit } from './patterns'
 import { detectChords, detectKey } from './theory'
 
 const grid120 = (beats = 200, offset = 0): Grid => ({
@@ -52,53 +71,172 @@ describe('grid', () => {
   })
 })
 
-describe('keys arrangement', () => {
-  it('a bass line in E1..G2 plays on OCT −2 without octave changes', () => {
+describe('one hand, one OCT', () => {
+  const layerKinds = (notes: BNote[]) => arrangeKeys(notes, MPK, grid120()).layers.map((l) => l.kind)
+  const fitsHand = (notes: BNote[]) =>
+    onsetGroups(notes).every((g) => {
+      const ps = g.map((x) => x.pitch)
+      return new Set(ps).size <= HAND_NOTES && Math.max(...ps) - Math.min(...ps) <= HAND_SPAN
+    })
+
+  it('a bass line in E1..G2 is one layer, untouched, at OCT −2', () => {
     const notes = [28, 31, 33, 35, 36, 38, 40, 43].map((p, i) => n(p, i))
     const a = arrangeKeys(notes, MPK, grid120())
-    expect(a.passes).toHaveLength(1)
-    expect(a.passes[0].startOctave).toBe(-2)
-    expect(a.passes[0].changes).toHaveLength(0)
-    expect(a.passes[0].events.every((e) => e.key >= 0 && e.key <= 24 && !e.folded)).toBe(true)
-    expect(a.passes[0].events[0].key).toBe(28 - 24)
+    expect(a.layers.map((l) => l.kind)).toEqual(['all'])
+    const fit = fitLayer(a.layers[0], MPK)
+    expect(fit.octave).toBe(-2)
+    expect(fit.events.every((e) => e.key >= 0 && e.key <= 24 && !e.folded)).toBe(true)
+    expect(fit.events[0].key).toBe(28 - 24)
   })
   it('prefers the default octave when several fit', () => {
     const a = arrangeKeys([60, 62, 64, 65, 67].map((p, i) => n(p, i)), MPK, grid120())
-    expect(a.passes[0].startOctave).toBe(0)
+    expect(fitLayer(a.layers[0], MPK).octave).toBe(0)
   })
-  it('changes octave between phrases, inside a rest', () => {
-    // Bar 1: low phrase (36..43), bars 2: rest, bar 3: high phrase (84..91).
+  it('gives every stretch one OCT: a low and a high phrase each fit without a change inside', () => {
     const low = [36, 38, 40, 43].map((p, i) => n(p, i, 0.9))
     const high = [84, 86, 88, 91].map((p, i) => n(p, 8 + i, 0.9))
-    const a = arrangeKeys([...low, ...high], MPK, grid120())
-    const pass = a.passes[0]
-    expect(a.passes).toHaveLength(1)
-    expect(pass.changes).toHaveLength(1)
-    const ch = pass.changes[0]
-    expect(ch.beat).toBeGreaterThan(3.9)
-    expect(ch.beat).toBeLessThan(8)
-    expect(ch.quick).toBe(false)
-    expect(pass.events.every((e) => !e.folded)).toBe(true)
+    const layer = arrangeKeys([...low, ...high], MPK, grid120()).layers[0]
+    const first = fitLayer(layer, MPK, { start: 0, end: 4 })
+    const second = fitLayer(layer, MPK, { start: 8, end: 12 })
+    expect(first.folded).toBe(0)
+    expect(second.folded).toBe(0)
+    expect(second.octave).toBeGreaterThan(first.octave)
+    expect(first.events.filter((e) => e.start < 4).every((e) => !e.folded && e.key >= 0 && e.key <= 24)).toBe(true)
+    expect(second.events.filter((e) => e.start >= 8).every((e) => !e.folded && e.key >= 0 && e.key <= 24)).toBe(true)
   })
-  it('splits a 4-octave chord part into two passes', () => {
+  it('a stretch keeps the layer’s own OCT when it fits there', () => {
+    const notes = [55, 60, 64, 67, 72, 76, 79, 74].map((p, i) => n(p, i))
+    const layer = arrangeKeys(notes, MPK, grid120()).layers[0]
+    const home = fitLayer(layer, MPK).octave
+    expect(fitLayer(layer, MPK, { start: 4, end: 8 }).octave).toBe(home)
+  })
+  it('moves notes a 25-key stretch cannot hold by an octave and counts only the stretch', () => {
+    const layer = arrangeKeys([48, 60, 72, 84, 50].map((p, i) => n(p, i)), MPK, grid120()).layers[0]
+    const fit = fitLayer(layer, MPK, { start: 0, end: 4 })
+    expect(fit.octave).toBe(0)
+    expect(fit.folded).toBe(1)
+    expect(fit.events.every((e) => e.key >= 0 && e.key <= 24)).toBe(true)
+    expect(fit.events.find((e) => e.srcPitch === 84)!.pitch).toBe(72)
+  })
+  it('splits a two-hand piano part into melody, chords and bass, each playable by one hand', () => {
     const notes: BNote[] = []
     for (let bar = 0; bar < 4; bar++) {
       const t = bar * 4
-      notes.push(n(36, t, 4), n(43, t, 4), n(76, t, 4), n(79, t, 4), n(84, t, 4))
+      notes.push(n(36, t, 2), n(43, t + 2, 2)) // left hand: one bass note at a time
+      notes.push(n(60, t, 1), n(64, t, 1), n(72, t, 1), n(74, t + 1, 1)) // right hand: a chord with the tune on top, a passing note
+      notes.push(n(60, t + 2, 1), n(65, t + 2, 1), n(76, t + 2, 1), n(74, t + 3, 1))
     }
     const a = arrangeKeys(notes, MPK, grid120())
-    expect(a.passes).toHaveLength(2)
-    const [upper, lower] = a.passes
-    expect(upper.low).toBeGreaterThanOrEqual(76)
-    expect(lower.high).toBeLessThanOrEqual(43)
-    expect(upper.changes).toHaveLength(0)
-    expect(lower.changes).toHaveLength(0)
-    expect(a.warnings.length).toBeGreaterThan(0)
+    expect(a.layers.map((l) => l.kind)).toEqual(['melody', 'chords', 'bass'])
+    expect(a.layers[0].notes.slice(0, 4).map((x) => x.pitch)).toEqual([72, 74, 76, 74])
+    expect(a.layers[2].notes.slice(0, 2).map((x) => x.pitch)).toEqual([36, 43])
+    for (const l of a.layers) expect(fitsHand(l.notes)).toBe(true)
+    expect(a.warnings.join(' ')).toContain('слои')
   })
-  it('an 88-key keyboard never needs octave changes', () => {
-    const a = arrangeKeys([21, 108, 60].map((p, i) => n(p, i)), { count: 88, lowNote: 21, octaveRange: [0, 0] }, grid120())
-    expect(a.passes).toHaveLength(1)
-    expect(a.passes[0].events.map((e) => e.key)).toEqual([0, 87, 39])
+  it('pads under a lead: the lead is the melody, the pad (tops included) stays a chord for one hand', () => {
+    const notes: BNote[] = []
+    for (let bar = 0; bar < 4; bar++) {
+      const t = bar * 4
+      notes.push(...[48, 55, 64, 67, 72].map((p) => n(p, t, 4, 70)))
+      notes.push(n(76, t + 1, 0.5), n(79, t + 1.5, 0.5), n(81, t + 2, 1), n(84, t + 3, 1))
+    }
+    const a = arrangeKeys(notes, MPK, grid120())
+    const melody = a.layers.find((l) => l.kind === 'melody')!
+    const chords = a.layers.find((l) => l.kind === 'chords')!
+    expect(new Set(melody.notes.map((x) => x.pitch))).toEqual(new Set([76, 79, 81, 84]))
+    expect(chords.notes.some((x) => x.pitch >= 76)).toBe(false)
+    expect(fitsHand(chords.notes)).toBe(true)
+    expect(chords.revoiced).toBeGreaterThan(0)
+  })
+  it('block chords in any inversion stay one chords layer', () => {
+    const triads = [[57, 60, 64], [57, 60, 65], [55, 60, 64], [55, 59, 62]] // Am F C G, close voicings
+    const notes = [0, 1].flatMap((r) => triads.flatMap((t, i) => t.map((p) => n(p, (r * 4 + i) * 4, 3.9))))
+    expect(layerKinds(notes)).toEqual(['chords'])
+  })
+  it('a big chord cut to four notes keeps its 3rd and loses its 5th first', () => {
+    const c9 = [48, 52, 55, 58, 62].map((p) => ({ ...n(p, 0), src: p })) // C E G Bb D
+    const r = oneHandChord(c9)
+    const pcs = new Set(r.notes.map((x) => x.pitch % 12))
+    expect(r.notes.length).toBeLessThanOrEqual(HAND_NOTES)
+    expect(pcs.has(4)).toBe(true)
+    expect(pcs.has(7)).toBe(false)
+    expect(Math.max(...r.notes.map((x) => x.pitch)) - Math.min(...r.notes.map((x) => x.pitch))).toBeLessThanOrEqual(HAND_SPAN)
+  })
+  it('drops quiet overtone ghosts of transcribed notes', () => {
+    const notes = [n(60, 0, 1, 100), n(72, 0, 1, 40), n(79, 0, 1, 30), n(62, 1, 1, 100), n(74, 1, 1, 90)]
+    expect(dropGhosts(notes).map((x) => x.pitch)).toEqual([60, 62, 74])
+  })
+  it('drums on keys and big keyboards keep the part as it is', () => {
+    const drums = [36, 38, 42, 36, 38, 42].map((p, i) => n(p, i / 2))
+    const a = arrangeKeys(drums, MPK, grid120(), { untouched: true })
+    expect(a.layers).toHaveLength(1)
+    expect(a.layers[0].notes.map((x) => x.pitch)).toEqual([36, 38, 42, 36, 38, 42])
+    const kb88: KeyboardSpec = { count: 88, lowNote: 21, octaveRange: [0, 0] }
+    const big = arrangeKeys([21, 108, 60].map((p, i) => n(p, i)), kb88, grid120(), { untouched: true })
+    expect(fitLayer(big.layers[0], kb88).events.map((e) => e.key)).toEqual([0, 87, 39])
+  })
+})
+
+describe('built-in lessons', () => {
+  it('every exercise is one layer at OCT 0 with nothing moved, and every note has a finger', () => {
+    for (const def of BUILTIN_LESSONS) {
+      const built = builtinLesson(def.id)!
+      for (const part of built.lesson.parts) {
+        const m = buildPartModel(built.lesson, part, PROFILES[0], null)!
+        const a = m.arrangement as KeysArrangement
+        expect(a.kind, `${def.id}/${part.id}`).toBe('keys')
+        expect(a.layers, `${def.id}/${part.id}`).toHaveLength(1)
+        const fit = fitLayer(a.layers[0], MPK)
+        expect(fit.octave, `${def.id}/${part.id}`).toBe(0)
+        expect(fit.events.every((e) => !e.folded), `${def.id}/${part.id}`).toBe(true)
+        const info = built.info.get(part.id)!
+        expect(part.notes.every((_, i) => info.fingers.has(i))).toBe(true)
+      }
+    }
+  })
+  it('chord voicings fit one hand on the keys at OCT 0 and are what they are called', () => {
+    for (const def of BUILTIN_LESSONS) {
+      for (const ex of def.exercises) {
+        for (const s of ex.steps ?? []) {
+          expect(Math.min(...s.notes)).toBeGreaterThanOrEqual(48)
+          expect(Math.max(...s.notes)).toBeLessThanOrEqual(72)
+          expect(s.notes.length).toBeLessThanOrEqual(HAND_NOTES)
+          expect(Math.max(...s.notes) - Math.min(...s.notes)).toBeLessThanOrEqual(HAND_SPAN)
+          expect(heldChordName(s.notes), `${def.id}: ${s.chord}`).toBe(s.chord)
+        }
+      }
+    }
+  })
+  it('chord marks sit on bar lines, one per written bar', () => {
+    const built = builtinLesson('chords-pop')!
+    const g = built.lesson.grid!
+    const info = built.info.get('pop-whole')!
+    expect(info.chords.map((c) => c.name)).toEqual(['C', 'G', 'Am', 'F', 'C', 'G', 'Am', 'F'])
+    for (const c of info.chords) expect((c.start - g.firstDownbeat) % g.barLength).toBe(0)
+  })
+  it('names the right-hand fingers of a chord', () => {
+    expect(chordFingers([60, 64, 67])).toEqual([1, 3, 5])
+    expect(chordFingers([59, 62, 67])).toEqual([1, 2, 5])
+    expect(chordFingers([57, 60, 64, 67])).toEqual([1, 2, 3, 5])
+  })
+})
+
+describe('note view and plain words', () => {
+  const g = grid120()
+  it('a click picks its bar, a drag the bars it touches, Alt whole beats', () => {
+    expect(snapSelection(g, 5.3, 5.3)).toEqual({ start: 4, end: 8 })
+    expect(snapSelection(g, 13.5, 5.2)).toEqual({ start: 4, end: 16 })
+    expect(snapSelection(g, 5.3, 6.6, true)).toEqual({ start: 5, end: 7 })
+  })
+  it('labels a stretch for people', () => {
+    expect(rangeLabel(g, { start: 4, end: 8 })).toBe('такт 2')
+    expect(rangeLabel(g, { start: 4, end: 16 })).toBe('такты 2–4')
+    expect(rangeLabel(g, { start: 5, end: 7 })).toBe('такт 2, доли 2–3')
+  })
+  it('explains chords in plain words', () => {
+    expect(chordInfo('Am')?.short).toBe('минор')
+    expect(chordInfo('F/C')?.short).toContain('внизу C')
+    expect(chordInfo('H7')).toBeNull()
   })
 })
 
@@ -270,5 +408,128 @@ describe('midi file', () => {
     expect(hex).toContain('ff5103' + (Math.round(60000000 / 124)).toString(16).padStart(6, '0'))
     expect(hex).toContain('902864') // note on E1 vel 100
     expect(hex).toContain('802800') // note off
+  })
+})
+
+/** Note-ons of every track of a MIDI file: [track, tick, note]. */
+function noteOns(bytes: Uint8Array): [number, number, number][] {
+  const out: [number, number, number][] = []
+  let i = 14 // after MThd
+  let track = -1
+  while (i + 8 <= bytes.length) {
+    const len = (bytes[i + 4] << 24) | (bytes[i + 5] << 16) | (bytes[i + 6] << 8) | bytes[i + 7]
+    let j = i + 8
+    const end = j + len
+    track++
+    let tick = 0
+    while (j < end) {
+      let delta = 0
+      while (bytes[j] & 0x80) delta = (delta << 7) | (bytes[j++] & 0x7f)
+      delta = (delta << 7) | bytes[j++]
+      tick += delta
+      const status = bytes[j++]
+      if (status === 0xff) {
+        j++ // meta type
+        let l = 0
+        while (bytes[j] & 0x80) l = (l << 7) | (bytes[j++] & 0x7f)
+        l = (l << 7) | bytes[j++]
+        j += l
+      } else {
+        if ((status & 0xf0) === 0x90) out.push([track, tick, bytes[j]])
+        j += 2
+      }
+    }
+    i = end
+  }
+  return out
+}
+
+describe('review fixes', () => {
+  const g = grid120()
+  const lessonOf = (notes: [number, number, number][]): Lesson => ({
+    id: 't', title: 't', createdAt: '', updatedAt: '', source: { kind: 'midi', stemFiles: [] }, status: 'ready', progress: 1,
+    warnings: [], durationSec: 30, grid: g, media: {}, prefs: {},
+    parts: [{ id: 'p', name: 'Lead', role: 'melody', isDrum: false, origin: 'midi', media: {}, silent: false,
+      notes: notes.map(([p, b, d]) => ({ p, s: beatTime(g, b), e: beatTime(g, b + d), v: 100 })) }],
+  })
+
+  it('a built-in exercise opens on one written pass: every chord of it is in the default loop', () => {
+    for (const def of BUILTIN_LESSONS) {
+      const built = builtinLesson(def.id)!
+      for (const part of built.lesson.parts) {
+        const info = built.info.get(part.id)!
+        const m = buildPartModel(built.lesson, part, PROFILES[0], null)!
+        expect((m.arrangement as KeysArrangement).layers).toHaveLength(1)
+        const pass = exercisePassBars(info.exercise)
+        // Exactly what the trainer shows (and the cover plan would list).
+        const p = layerBlocks(m, built.lesson.grid!, 0, pass)
+        const u = mainUnit(p)!
+        expect(u.bars, `${def.id}/${part.id}`).toBe(pass)
+        if (info.exercise.steps) {
+          const inside = info.chords.filter((c) => c.start >= u.startBeat - 1e-6 && c.end <= u.endBeat + 1e-6).map((c) => c.name)
+          expect(new Set(inside), `${def.id}/${part.id}`).toEqual(new Set(info.exercise.steps.map((s) => s.chord)))
+        }
+      }
+    }
+  })
+  it('the whole-part MIDI keeps every note at its real pitch (each stretch has its own OCT)', () => {
+    const verse: [number, number, number][] = [55, 57, 59, 60, 62, 64, 65, 67].map((p, i) => [p, i, 0.9])
+    const chorus: [number, number, number][] = [74, 76, 79, 81, 83, 84, 86, 84].map((p, i) => [p, 16 + i, 0.9])
+    const lesson = lessonOf([...verse, ...chorus])
+    const model = buildPartModel(lesson, lesson.parts[0], PROFILES[0], null)!
+    const pitches = noteOns(exportPartMidi(lesson, model, PROFILES[0])).map(([, , note]) => note)
+    expect(pitches).toEqual([...verse, ...chorus].map(([p]) => p))
+  })
+  it('the MIDI of a stretch keeps a downbeat played a hair early and leaves out the next one', () => {
+    const lesson = lessonOf([[60, 0, 1]])
+    const events = [
+      { start: 3.98, dur: 1, target: 60, vel: 100 },
+      { start: 5, dur: 1, target: 62, vel: 100 },
+      { start: 7.98, dur: 1, target: 60, vel: 100 },
+    ]
+    expect(noteOns(exportStretchMidi(lesson, 'x', events, { start: 4, end: 8 }, 0)).map(([, tick, note]) => [tick, note])).toEqual([
+      [0, 60],
+      [480, 62],
+    ])
+  })
+  it('an octave doubling folded onto its twin is one key struck once', () => {
+    const notes = [...[64, 67, 71, 76].map((p) => n(p, 0, 4)), ...[55, 59, 62, 67].map((p) => n(p, 4, 4))].map((x) => ({ ...x, src: x.pitch }))
+    const layer = { index: 0, kind: 'chords' as const, label: 'Аккорды', hint: '', notes, revoiced: 0, low: 55, high: 76 }
+    const fit = fitLayer(layer, MPK, { start: 0, end: 8 })
+    const first = fit.events.filter((e) => e.start === 0).map((e) => e.pitch)
+    expect(new Set(first).size).toBe(first.length)
+    expect(fit.octave).toBe(0)
+  })
+  it('a tune too short for its own layer leaves the chords fitted to one hand', () => {
+    const chords = [[48, 52, 55, 60, 64], [45, 48, 52, 57, 60], [41, 45, 48, 53, 57]]
+    const notes = chords.flatMap((c, i) => c.map((p) => n(p, i * 4, 4)))
+    const a = arrangeKeys(notes, MPK, grid120(), { melodic: true })
+    for (const l of a.layers) {
+      for (const grp of onsetGroups(l.notes)) {
+        const ps = grp.map((x) => x.pitch)
+        expect(Math.max(...ps) - Math.min(...ps)).toBeLessThanOrEqual(HAND_SPAN)
+        expect(new Set(ps).size).toBeLessThanOrEqual(HAND_NOTES)
+      }
+    }
+  })
+  it('the low notes a bass line leaves out are counted and reported', () => {
+    const notes: BNote[] = []
+    for (let bar = 0; bar < 4; bar++) {
+      const t = bar * 4
+      notes.push(n(36, t, 1), n(43, t, 1), n(36, t + 1, 1), n(36, t + 2, 1), n(36, t + 3, 1)) // C2 + G2 on one, then C2 alone
+      notes.push(n(60, t, 1), n(64, t, 1), n(72, t, 1), n(74, t + 1, 1), n(60, t + 2, 1), n(65, t + 2, 1), n(76, t + 2, 1), n(74, t + 3, 1))
+    }
+    const a = arrangeKeys(notes, MPK, grid120())
+    const bass = a.layers.find((l) => l.kind === 'bass')!
+    expect(bass.revoiced).toBe(4)
+    expect(a.warnings.join(' ')).toContain('убраны')
+  })
+  it('spells chords and fingers the way the lessons teach them', () => {
+    expect(chordFlats('Ab')).toBe(true)
+    expect(chordFlats('Cm')).toBe(true)
+    expect(chordFlats('E')).toBe(false)
+    expect(chordFlats('G#m')).toBe(false)
+    expect(chordFingers([57, 62, 64])).toEqual([1, 4, 5]) // Asus4: two neighbouring top keys
+    expect(chordFingers([57, 59, 64])).toEqual([1, 2, 5]) // Asus2
   })
 })

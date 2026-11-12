@@ -73,7 +73,6 @@ const ev = (i: number, start: number, dur: number, pitch: number): TutorEvent =>
   vel: 100,
   color: '#fff',
   label: '',
-  octave: 0,
   drum: false,
   folded: false,
 })
@@ -82,11 +81,13 @@ const ev = (i: number, start: number, dur: number, pitch: number): TutorEvent =>
 const track: TutorTrack = {
   events: [ev(0, 0, 0.5, 60), ev(1, 1, 0.5, 62), ev(2, 2, 2, 64), ev(3, 5, 0.5, 65)],
   lanes: { kind: 'keys', count: 25, lowNote: 48, labels: [], colors: [], slots: [] },
-  segments: [],
-  changes: [],
-  startOctave: 0,
-  passCount: 1,
-  passLabel: '',
+  octave: 0,
+  folded: 0,
+  layerCount: 1,
+  layerIndex: 0,
+  layerLabel: 'Вся партия',
+  layerHint: '',
+  layerKind: 'all',
 }
 const part = { id: 'p', name: 'Lead', role: 'melody', isDrum: false, origin: 'midi', notes: [], media: {} } as unknown as Part
 const sound = { part: 'off', backing: false, mix: false, metronome: false, countIn: false, monitor: false, autoTempo: false, repeat: false } as const
@@ -274,6 +275,100 @@ describe('repeat mode', () => {
     await startPlay(0, { t: riff, repeat: true, loop: { start: 0, end: 4 } })
     at(2.01)
     expect(session.transport.now()).toBeCloseTo(0.01, 3)
+  })
+})
+
+describe('one stretch, once or by layer', () => {
+  it('with "по кругу" off a selected stretch plays once and ends with a result', async () => {
+    await startPlay(0, { loop: { start: 0, end: 2 } }) // beats 0–2 = C4 and D4 only
+    at(0)
+    press(60)
+    release(60)
+    at(0.5)
+    press(62)
+    release(62)
+    at(1.6) // the stretch ends at 1.0 s; nothing plays on to the end of the part
+    const snap = session.getSnapshot()
+    expect(snap.playing).toBe(false)
+    expect(snap.result?.accuracy).toBe(1)
+    expect(snap.result?.stats.miss).toBe(0)
+  })
+
+  it('a new track (another layer or OCT) keeps the session and starts the run over', async () => {
+    const created: unknown[] = []
+    const RealAudio = (globalThis as { Audio?: unknown }).Audio
+    ;(globalThis as unknown as { Audio: unknown }).Audio = class {
+      preload = ''
+      volume = 0
+      constructor() {
+        created.push(this)
+      }
+      removeAttribute() {}
+      pause() {}
+    }
+    try {
+      clock.latency = 0
+      session = new S.TutorSession(grid, track, part, PROFILE, { offset: 0, stem: '/x.ogg' }, { ...sound }, 1)
+      expect(created).toHaveLength(1)
+      session.setMode('play')
+      const t1 = clock.t
+      await session.toggle()
+      songZero = t1 + 0.05
+      at(0)
+      press(60)
+      release(60)
+      expect(session.getSnapshot().stats.perfect).toBe(1)
+      // The same notes an octave up — e.g. another stretch fitted to OCT +1.
+      const up: TutorTrack = { ...track, octave: 1, events: track.events.map((e) => ({ ...e, target: e.target + 12, pitch: e.pitch + 12 })) }
+      session.setTrack(up)
+      expect(created).toHaveLength(1) // no new media
+      const s0 = session.getSnapshot()
+      expect(s0.stats.perfect).toBe(0)
+      expect(s0.result).toBeNull()
+      expect(s0.octaveNow).toBe(1)
+      const t0 = clock.t
+      await session.toggle()
+      songZero = t0 + 0.05
+      at(0)
+      press(72)
+      release(72)
+      expect(session.getSnapshot().stats.perfect).toBe(1)
+    } finally {
+      ;(globalThis as unknown as { Audio: unknown }).Audio = RealAudio
+    }
+  })
+})
+
+describe('step mode', () => {
+  const chordTrack: TutorTrack = { ...track, events: [ev(0, 0, 4, 60), ev(1, 0, 4, 64), ev(2, 0, 4, 67), ev(3, 4, 1, 62)] }
+  const learn = (together: boolean) => {
+    session = new S.TutorSession(grid, chordTrack, part, PROFILE, { offset: 0 }, { ...sound }, 1)
+    session.setChordsTogether(together)
+    session.setMode('learn')
+  }
+
+  it('takes a chord one key at a time by default', () => {
+    learn(false)
+    for (const p of [60, 64, 67]) {
+      press(p)
+      release(p)
+    }
+    expect(session.getSnapshot().stepIndex).toBe(1)
+  })
+
+  it('in chord lessons waits until all keys of the chord are held together', () => {
+    learn(true)
+    for (const p of [60, 64, 67]) {
+      press(p)
+      release(p)
+    }
+    expect(session.getSnapshot().stepIndex).toBe(0)
+    expect(session.getSnapshot().hint).toContain('вместе')
+    press(60)
+    press(64)
+    press(67)
+    expect(session.getSnapshot().stepIndex).toBe(1)
+    for (const p of [60, 64, 67]) release(p)
   })
 })
 

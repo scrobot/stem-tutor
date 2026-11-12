@@ -3,7 +3,7 @@ import type { Grid, Lesson, Part } from '../types'
 import { effectiveProfile, keyboardSpec, padSpec, type InstrumentProfile } from '../instruments/profiles'
 import { arrangeKeys, arrangePads, type Arrangement, type PadOverrides } from './arrange'
 import { barSpan, partToBeats, type BNote } from './grid'
-import { analyzePatterns, type PatternAnalysis, type PatternEvent } from './patterns'
+import { analyzeBlocks, type PatternAnalysis, type PatternEvent } from './patterns'
 import { detectChords, detectKey, type ChordSeg, type KeyInfo } from './theory'
 
 export interface LessonModel {
@@ -32,11 +32,16 @@ export interface PartModel {
   patternInput: { events: PatternEvent[]; tolerance: number }
 }
 
-/** The same part split into blocks of another length (undefined: the automatic choice). */
-export function withUnitBars(model: PartModel, grid: Grid, unitBars: number | undefined): PartModel {
-  if (!unitBars) return model
-  const { events, tolerance } = model.patternInput
-  return { ...model, patterns: analyzePatterns(events, grid, model.bars[0], model.bars[1], 4, tolerance, unitBars) }
+/**
+ * The blocks of one layer of a part (keys), or of its pad hits (`layerIndex` null): what the
+ * trainer shows in «Из чего состоит дорожка» and the cover plan lists as loops. One function
+ * for both, so their letters and stretches always agree.
+ */
+export function layerBlocks(model: PartModel, grid: Grid, layerIndex: number | null, unitBars?: number): PatternAnalysis {
+  const a = model.arrangement
+  const layer = a.kind === 'keys' && layerIndex !== null ? a.layers[layerIndex] : undefined
+  const events = layer ? layer.notes.map((n) => ({ start: n.start, target: n.pitch })) : model.patternInput.events
+  return analyzeBlocks(events, grid, model.bars[0], model.bars[1], 4, model.patternInput.tolerance, unitBars)
 }
 
 export function defaultQuantize(part: Part, lesson: Lesson): number {
@@ -96,7 +101,7 @@ export function buildPartModel(
   part: Part,
   baseProfile: InstrumentProfile,
   calibration: Parameters<typeof effectiveProfile>[1],
-  opts: { simplify?: boolean; unitBars?: number } = {},
+  opts: { simplify?: boolean; unitBars?: number; topAsMelody?: boolean } = {},
 ): PartModel | null {
   const grid = lesson.grid
   if (!grid) return null
@@ -112,14 +117,23 @@ export function buildPartModel(
     arrangement = a
     events = a.events.map((e) => ({ start: e.start, target: `${e.bank}:${e.pad}` }))
   } else {
-    const a = arrangeKeys(notes, keyboardSpec(profile), grid, { simplify: opts.simplify })
+    const kb = keyboardSpec(profile)
+    const a = arrangeKeys(notes, kb, grid, {
+      simplify: opts.simplify,
+      topAsMelody: opts.topAsMelody,
+      transcribed: part.origin === 'transcribed',
+      // Drums played on keys keep their notes (an octave away is another drum); a big keyboard has room for two hands.
+      untouched: part.isDrum || kb.count >= 49,
+      melodic: part.role === 'melody' || part.role === 'vocal',
+    })
     arrangement = a
-    events = a.passes.flatMap((p) => p.events.map((e) => ({ start: e.start, target: e.pitch })))
+    // Blocks are found on what is actually played (all layers together).
+    events = a.layers.flatMap((l) => l.notes.map((e) => ({ start: e.start, target: e.pitch })))
   }
   const bars = barSpan(notes, grid) ?? [0, 0]
   // Transcribed parts carry a little noise (a missed hat, a ghost note): match loosely.
   const tolerance = part.origin === 'transcribed' ? 0.85 : 1
-  const patterns = analyzePatterns(events, grid, bars[0], bars[1], 4, tolerance, opts.unitBars)
+  const patterns = analyzeBlocks(events, grid, bars[0], bars[1], 4, tolerance, opts.unitBars)
   const pitches = notes.map((n) => n.pitch)
   const nBars = Math.max(1, bars[1] - bars[0] + 1)
   return {

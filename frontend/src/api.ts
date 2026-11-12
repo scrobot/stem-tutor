@@ -1,4 +1,17 @@
-import type { Grid, Health, Lesson, LessonPrefs, LessonSummary, Role, Settings } from './types'
+import type {
+  AiCheck,
+  AiModel,
+  AiStatus,
+  Grid,
+  Health,
+  Lesson,
+  LessonPrefs,
+  LessonSummary,
+  ProducerAnswer,
+  ProducerRequest,
+  Role,
+  Settings,
+} from './types'
 
 export class ApiError extends Error {
   status: number
@@ -51,6 +64,19 @@ export const api = {
   deleteLesson: (id: string) => request<void>(`/api/lessons/${id}`, { method: 'DELETE' }),
   retryLesson: (id: string) => request<Lesson>(`/api/lessons/${id}/retry`, { method: 'POST' }),
   cancelLesson: (id: string) => request<{ ok: boolean }>(`/api/lessons/${id}/cancel`, { method: 'POST' }),
+  // The AI producer (OpenRouter). The key is sent once and only its hint comes back.
+  ai: () => request<AiStatus>('/api/ai'),
+  saveAi: (p: { key?: string | null; model?: string | null }) => request<AiStatus>('/api/ai', json('PUT', p)),
+  checkAi: () => request<AiCheck>('/api/ai/check'),
+  aiModels: () => request<{ models: AiModel[] }>('/api/ai/models'),
+  producer: (id: string) => request<ProducerAnswer>(`/api/lessons/${id}/cover/producer`),
+  askProducer: (id: string, body: ProducerRequest) => request<ProducerAnswer>(`/api/lessons/${id}/cover/producer`, json('POST', body)),
+  clearProducer: (id: string) => request<void>(`/api/lessons/${id}/cover/producer`, { method: 'DELETE' }),
+  // A good pass in the trainer, merged into prefs.coverLearned by the server (safe across tabs).
+  addLearnedMark: (
+    id: string,
+    mark: { part: string; layer: string; start: number; end: number; acc: number; tempo: number; at: number },
+  ) => request<{ coverLearned: unknown[] }>(`/api/lessons/${id}/cover/learned`, json('POST', mark)),
 }
 
 export const mediaUrl = (lessonId: string, rel: string) =>

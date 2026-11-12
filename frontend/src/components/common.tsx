@@ -52,6 +52,8 @@ export function fmtBpm(bpm?: number | null): string {
   return Math.abs(bpm - Math.round(bpm)) < 0.005 ? `${Math.round(bpm)} BPM` : `${Number(bpm.toFixed(2))} BPM`
 }
 
+export { plural } from '../music/explain'
+
 export function downloadBlob(data: BlobPart, filename: string, type = 'application/octet-stream') {
   const url = URL.createObjectURL(new Blob([data], { type }))
   const a = document.createElement('a')

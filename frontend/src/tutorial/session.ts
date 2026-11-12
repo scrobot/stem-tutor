@@ -14,9 +14,9 @@ import { playDrum, playNote, presetForRole, startNote } from '../audio/synth'
 import { newWaterfallState, type Grade, type HoldGrade, type WaterfallState } from '../components/Waterfall'
 import { classifyNote, type InstrumentProfile } from '../instruments/profiles'
 import { onMidi, type MidiMsg } from '../midi/midi'
-import { beatTime, localBeatSec, timeToBeat } from '../music/grid'
+import { beatTime, inStretch, localBeatSec, timeToBeat } from '../music/grid'
 import type { Grid, Part } from '../types'
-import { octaveAt, stepGroups, type StepGroup, type TutorEvent, type TutorTrack } from './events'
+import { stepGroups, type StepGroup, type TutorEvent, type TutorTrack } from './events'
 
 export type Mode = 'prepare' | 'watch' | 'learn' | 'play' | 'daw'
 
@@ -28,7 +28,7 @@ export interface SoundSettings {
   countIn: boolean
   monitor: boolean
   autoTempo: boolean
-  /** Play mode: repeat the selected stretch (true) or play on to the end of the part. */
+  /** Play mode: repeat the selected stretch (true) or play it once and show the result. */
   repeat: boolean
 }
 
@@ -75,7 +75,6 @@ export interface SessionSnapshot {
   stats: PlayStats
   history: { accuracy: number; tempo: number; meanOffsetMs: number }[]
   tempo: number
-  nextChange: { inBeats: number; to: number; from: number } | null
   /** Play mode: the finished run (shown until the next start). */
   result: RunResult | null
   /** Audio output latency the scoring compensates for, plus the player's correction (ms). */
@@ -199,6 +198,9 @@ export class TutorSession {
   // input
   private pressedBy = new Map<number, number>() // MIDI note → lane lit while it is down
   private voices = new Map<number, () => void>() // monitor voices by MIDI note
+  private held = new Set<number>() // MIDI notes that are down right now
+  private chordsTogether = false // step mode: a chord counts only with all its keys held at once
+  private guideOff: (() => void) | null = null
 
   constructor(
     private grid: Grid,
@@ -218,7 +220,7 @@ export class TutorSession {
       playing: false,
       paused: false,
       beat: 0,
-      octaveNow: track.startOctave,
+      octaveNow: track.octave,
       expectedLanes: [],
       stepIndex: 0,
       stepTotal: 0,
@@ -230,7 +232,6 @@ export class TutorSession {
       stats: emptyStats(),
       history: [],
       tempo,
-      nextChange: null,
       result: null,
       latencyMs: inputOffsetMs,
       calibrateMs: null,
@@ -246,22 +247,7 @@ export class TutorSession {
     for (const el of Object.values(this.media)) {
       if (el) this.unsubs.push(this.transport.follow({ el, offset: sources.offset } as FollowedMedia))
     }
-    const guide: TimedNote[] = track.events.map((e) => ({
-      s: beatTime(grid, e.start),
-      e: beatTime(grid, e.start + e.dur),
-      pitch: e.pitch,
-      vel: e.vel,
-      drum: e.drum,
-    }))
-    const preset = presetForRole(part.role)
-    this.unsubs.push(
-      this.transport.addSource(
-        notesSource(guide, {
-          preset,
-          enabled: () => this.snap.mode === 'watch' ? this.sound.part === 'synth' : this.snap.mode === 'play' && this.sound.part === 'synth',
-        }),
-      ),
-    )
+    this.addGuide()
     this.unsubs.push(
       this.transport.addSource(
         metronomeSource(grid, {
@@ -304,9 +290,26 @@ export class TutorSession {
   }
 
   setLoop(range: { start: number; end: number } | null) {
+    const changed = (range?.start ?? null) !== (this.loopBeats?.start ?? null) || (range?.end ?? null) !== (this.loopBeats?.end ?? null)
     this.loopBeats = range
     this.stop()
     this.resetLoopState()
+    if (changed) this.update({ result: null, history: [] })
+    this.park()
+    if (this.snap.mode === 'learn') this.startLearn()
+  }
+
+  /**
+   * Another layer or another stretch (its own OCT setting) without rebuilding the session:
+   * the media, tempo, mode and sound settings stay; the run starts over.
+   */
+  setTrack(track: TutorTrack) {
+    if (track === this.track) return
+    this.stop()
+    this.track = track
+    this.addGuide()
+    this.resetLoopState()
+    this.update({ octaveNow: track.octave, expectedLanes: [], result: null, history: [] })
     this.park()
     if (this.snap.mode === 'learn') this.startLearn()
   }
@@ -337,6 +340,13 @@ export class TutorSession {
     }
   }
 
+  /** Step mode: take a chord only when all its keys are held together (chord lessons). */
+  setChordsTogether(on: boolean) {
+    if (on === this.chordsTogether) return
+    this.chordsTogether = on
+    if (this.snap.mode === 'learn') this.startLearn()
+  }
+
   /** The player's own timing correction on top of the measured output latency (ms). */
   setInputOffset(ms: number) {
     this.offsetMs = ms
@@ -363,6 +373,8 @@ export class TutorSession {
     this.stop()
     this.releaseVoices()
     window.clearInterval(this.uiTimer)
+    this.guideOff?.()
+    this.guideOff = null
     for (const u of this.unsubs) u()
     this.transport.dispose()
     for (const el of Object.values(this.media)) el?.removeAttribute('src')
@@ -370,6 +382,24 @@ export class TutorSession {
   }
 
   // -- internals -------------------------------------------------------------------------
+  /** The synth guide for the current track (watch mode, play mode with the hint on). */
+  private addGuide() {
+    this.guideOff?.()
+    const guide: TimedNote[] = this.track.events.map((e) => ({
+      s: beatTime(this.grid, e.start),
+      e: beatTime(this.grid, e.start + e.dur),
+      pitch: e.pitch,
+      vel: e.vel,
+      drum: e.drum,
+    }))
+    this.guideOff = this.transport.addSource(
+      notesSource(guide, {
+        preset: presetForRole(this.part.role),
+        enabled: () => (this.snap.mode === 'watch' || this.snap.mode === 'play') && this.sound.part === 'synth',
+      }),
+    )
+  }
+
   private update(p: Partial<SessionSnapshot>) {
     this.snap = { ...this.snap, ...p }
     for (const fn of this.subs) fn()
@@ -407,16 +437,15 @@ export class TutorSession {
   private start() {
     if (this.snap.mode !== 'watch' && this.snap.mode !== 'play') return
     const play = this.snap.mode === 'play'
-    const sel = this.range()
-    // Play mode: repeat the selection (the whole part with nothing selected), or play on from
-    // it to the end of the part. Watch mode loops a selected block.
+    // Play mode repeats the selection (the whole part with nothing selected) or plays it once;
+    // watch mode loops a selected stretch.
     const looping = play ? this.sound.repeat : this.loopBeats !== null
-    const r = play && !this.sound.repeat ? { start: sel.start, end: Math.max(sel.end, this.wholeRange().end) } : sel
+    const r = this.range()
     const startSec = beatTime(this.grid, r.start)
     const endSec = beatTime(this.grid, r.end)
     this.spanSec = { start: startSec, end: endSec }
     this.passLen = looping && endSec > startSec ? endSec - startSec : Infinity
-    this.spanEvents = this.track.events.filter((e) => e.start >= r.start - 1e-6 && e.start < r.end - 1e-6)
+    this.spanEvents = this.track.events.filter((e) => inStretch(e.start, r))
     this.transport.loop = looping ? { start: startSec, end: endSec } : null
     this.transport.endTime = endSec + 0.5
     this.transport.latency = this.latencySec()
@@ -633,8 +662,7 @@ export class TutorSession {
       return { lane: lane >= 0 ? lane : null, target: m.note, pad: true, bank: pad.bank }
     }
     if (pad && !this.part.isDrum) return { lane: null, target: -1, pad: true }
-    const o = octaveAt(this.track, this.getNowCoarse())
-    const lane = m.note - (this.track.lanes.lowNote + 12 * o)
+    const lane = m.note - (this.track.lanes.lowNote + 12 * this.track.octave)
     return { lane: lane >= 0 && lane < this.track.lanes.count ? lane : null, target: m.note, pad: false }
   }
 
@@ -647,6 +675,8 @@ export class TutorSession {
     if (m.type !== 'noteon' && m.type !== 'noteoff') return
     const info = this.laneOf(m)
     const st = this.wf.current
+    if (m.type === 'noteon') this.held.add(m.note)
+    else this.held.delete(m.note)
     if (m.type === 'noteoff') {
       const lit = this.pressedBy.get(m.note) ?? info.lane
       if (lit !== null) st.pressed.delete(lit)
@@ -680,34 +710,45 @@ export class TutorSession {
     }
   }
 
+  /** The current step is done: play it back and move on (or start the loop over). */
+  private completeStep(g: StepGroup) {
+    const st = this.wf.current
+    for (const e of g.events) st.done.add(e.i)
+    this.guide(g)
+    const next = this.snap.stepIndex + 1
+    if (next >= this.groups.length) {
+      const clean = this.loopMistakes === 0
+      this.loopMistakes = 0
+      st.done.clear()
+      this.update({
+        loopsDone: this.snap.loopsDone + 1,
+        cleanLoops: this.snap.cleanLoops + (clean ? 1 : 0),
+        hint: clean ? 'Круг без ошибок! ✓' : 'Круг пройден — ещё раз, без ошибок.',
+        octaveHint: null,
+      })
+      this.display = this.groups[0]?.start ?? 0
+      this.setStep(0)
+    } else {
+      this.update({ hint: null, octaveHint: null })
+      this.setStep(next)
+    }
+  }
+
   private learnInput(info: ReturnType<TutorSession['laneOf']>, note: number) {
     const st = this.wf.current
     const g = this.groups[this.snap.stepIndex]
     if (!g) return
+    if (this.chordsTogether && this.track.lanes.kind === 'keys' && g.targets.size > 1 && g.targets.has(info.target)) {
+      // A chord: it counts once all its keys are down together.
+      if (info.lane !== null) st.flashes.push({ lane: info.lane, text: '✓', color: '#5bd6a7', t: performance.now() })
+      if ([...g.targets].every((t) => this.held.has(t))) this.completeStep(g)
+      else this.update({ hint: 'Зажмите все клавиши аккорда вместе: держите нажатые и добавьте остальные.', octaveHint: null })
+      return
+    }
     if (this.pending.has(info.target)) {
       this.pending.delete(info.target)
       if (info.lane !== null) st.flashes.push({ lane: info.lane, text: '✓', color: '#5bd6a7', t: performance.now() })
-      if (this.pending.size === 0) {
-        for (const e of g.events) st.done.add(e.i)
-        this.guide(g)
-        const next = this.snap.stepIndex + 1
-        if (next >= this.groups.length) {
-          const clean = this.loopMistakes === 0
-          this.loopMistakes = 0
-          st.done.clear()
-          this.update({
-            loopsDone: this.snap.loopsDone + 1,
-            cleanLoops: this.snap.cleanLoops + (clean ? 1 : 0),
-            hint: clean ? 'Круг без ошибок! ✓' : 'Круг пройден — ещё раз, без ошибок.',
-            octaveHint: null,
-          })
-          this.display = this.groups[0]?.start ?? 0
-          this.setStep(0)
-        } else {
-          this.update({ hint: null, octaveHint: null })
-          this.setStep(next)
-        }
-      }
+      if (this.pending.size === 0) this.completeStep(g)
       return
     }
     // Wrong input.
@@ -890,19 +931,16 @@ export class TutorSession {
       }
       expected = [...set]
     }
-    const octaveNow = octaveAt(this.track, beat)
-    const next = this.track.changes.find((c) => c.beat > beat)
-    const nextChange = next && next.beat - beat <= this.grid.barLength * 2 ? { inBeats: next.beat - beat, to: next.to, from: next.from } : null
+    const octaveNow = this.track.octave
     const same = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i])
     expected.sort((a, b) => a - b)
     if (
       !same(expected, this.snap.expectedLanes) ||
       octaveNow !== this.snap.octaveNow ||
-      (nextChange?.to ?? null) !== (this.snap.nextChange?.to ?? null) ||
       Math.floor(beat) !== Math.floor(this.snap.beat) ||
       this.transport.playing !== this.snap.playing
     ) {
-      this.update({ expectedLanes: expected, octaveNow, nextChange, beat, playing: this.transport.playing })
+      this.update({ expectedLanes: expected, octaveNow, beat, playing: this.transport.playing })
     }
   }
 }

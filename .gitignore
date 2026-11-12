@@ -10,8 +10,8 @@ __pycache__/
 .pytest_cache/
 
 # Local state: lesson data, the separation choice start.bat remembers, logs
-data/
-.with-separation
+/data/
+/.with-separation
 *.log
 
 # Local tool settings (machine-specific paths)

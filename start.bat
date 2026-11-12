@@ -26,7 +26,6 @@ if /i "%~1"=="--with-separation" (
 )
 if /i "%~1"=="--without-separation" (
   if exist "%ROOT%.with-separation" del "%ROOT%.with-separation"
-  if exist "%ST_HOME%\with-separation" del "%ST_HOME%\with-separation"
   set "ST_ACTION=1"
 )
 if /i "%~1"=="--repair-separation" (
@@ -46,7 +45,6 @@ shift
 goto args
 :argsdone
 if exist "%ROOT%.with-separation" set "WITH_SEP=--extra separation"
-if exist "%ST_HOME%\with-separation" set "WITH_SEP=--extra separation"
 
 rem Already running: without flags just open it; flags need the environment the running
 rem server has loaded, so they only work after closing it. No pipe here: a pipe whose
@@ -93,10 +91,10 @@ if defined WITH_SEP echo Модуль разделения Demucs включён
 if defined REPAIR echo Переустанавливаю PyTorch и Demucs.
 echo [1/3] Python-окружение %WITH_SEP%
 pushd backend
-%UV% sync --python 3.12 %WITH_SEP% %REPAIR%
+%UV% sync --frozen --python 3.12 %WITH_SEP% %REPAIR%
 if errorlevel 1 if defined WITH_SEP (
   echo [!] Модуль разделения не установился — запускаю без него. Повторите start.bat позже или отключите: start.bat --without-separation
-  %UV% sync --python 3.12
+  %UV% sync --frozen --python 3.12
 )
 if errorlevel 1 (
   popd

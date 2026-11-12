@@ -150,3 +150,26 @@ class Settings(BaseModel):
     midiInputName: Optional[str] = None
     calibrations: dict[str, dict[str, Any]] = Field(default_factory=dict)
     ui: dict[str, Any] = Field(default_factory=dict)
+
+
+class AiSettingsPatch(BaseModel):
+    """PUT /api/ai: an absent field stays as it is, null or "" clears it."""
+
+    key: Any = None  # checked by producer.clean_key (400), so a bad value is never echoed back
+    model: Optional[str] = None
+
+
+class ProducerAudio(BaseModel):
+    start: float  # seconds of lesson time
+    duration: float
+
+
+class ProducerRequest(BaseModel):
+    """POST /api/lessons/{id}/cover/producer (ids and ranges are checked by the producer: 400)."""
+
+    digest: dict[str, Any]
+    digestKey: str
+    trackIds: list[str]
+    loopIds: list[str] = Field(default_factory=list)
+    audio: Optional[ProducerAudio] = None
+    model: Optional[str] = None  # overrides the saved model for this call

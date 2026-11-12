@@ -87,8 +87,33 @@ export default function LibraryPage() {
 
   return (
     <div className="page">
+      <section className="how-to">
+        <h2>Как заниматься</h2>
+        <ol className="how-steps">
+          <li>
+            <b>Выберите кусок</b> — 1–4 такта, которые повторяются в треке. Одна рука, одна октава.
+          </li>
+          <li>
+            <b>Разучите медленно</b> — программа подождёт, пока вы нажмёте нужные клавиши.
+          </li>
+          <li>
+            <b>Играйте по кругу</b> — темп сам дорастёт до 100%.
+          </li>
+          <li>
+            <b>Запишите в DAW</b> — каждую дорожку отдельно, кусок за куском. Из таких петель и собирается трек.
+          </li>
+        </ol>
+        <div className="row wrap">
+          <Link className="btn" to="/learn">
+            Начать с аккордов и разминки →
+          </Link>
+          <Link className="btn ghost" to="/help">
+            Словарик
+          </Link>
+        </div>
+      </section>
       <div className="row between">
-        <h1>Уроки</h1>
+        <h1>Мои треки</h1>
         <button className="btn primary" onClick={() => setDialog(true)}>
           + Новый урок
         </button>
@@ -97,7 +122,7 @@ export default function LibraryPage() {
       {lessons && lessons.length === 0 && (
         <div className="empty">
           <h2>Пока пусто</h2>
-          <p>Урок — это трек, разобранный на дорожки и переложенный под ваш контроллер. Есть два пути:</p>
+          <p>Урок — это трек, разобранный на дорожки и переложенный под вашу клавиатуру. Есть два пути:</p>
           <div className="grid-2">
             <div className="card">
               <h3>Готовые материалы</h3>

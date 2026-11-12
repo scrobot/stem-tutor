@@ -3,7 +3,10 @@ import { Link, useParams } from 'react-router-dom'
 import { api, exportAudioUrl, mediaUrl } from '../api'
 import { Transport, resumeAudio } from '../audio/engine'
 import { metronomeSource } from '../audio/sources'
-import { Progress, ROLE_HINT, ROLE_LABEL, RoleChip, downloadBlob, fmtBpm, fmtDuration, safeName } from '../components/common'
+import { Progress, ROLE_HINT, ROLE_LABEL, RoleChip, downloadBlob, fmtBpm, fmtDuration, plural, safeName } from '../components/common'
+import { readCoverPrefs } from '../cover/progress'
+import { keyboardSpec } from '../instruments/profiles'
+import { fitLayer } from '../music/arrange'
 import { DRUM_LABEL } from '../music/drums'
 import { exportPartMidi } from '../music/exportMidi'
 import { editGrid, scaleGrid, timeToBeat } from '../music/grid'
@@ -162,13 +165,13 @@ function PartCard({ lesson, model, onPatch }: { lesson: Lesson; model: PartModel
       .slice(0, 6)
       .map((s) => `${profile.pads!.banks[s.bank].id}${s.pad + 1} ${DRUM_LABEL[s.cls]}`)
       .join(' · ')
-  } else if (a.passes.length) {
-    const p = a.passes[0]
+  } else if (a.layers.length) {
     const oct = (o: number) => `OCT ${o > 0 ? '+' : ''}${o}`
+    const kb = keyboardSpec(profile)
     summary =
-      a.passes.length > 1
-        ? `${a.passes.length} прохода: ${a.passes.map((x) => oct(x.startOctave)).join(' / ')}`
-        : `${oct(p.startOctave)}${p.changes.length ? `, смен октавы: ${p.changes.length}` : ', без смен октавы'}`
+      a.layers.length > 1
+        ? `одной рукой по слоям: ${a.layers.map((l) => `${l.label} ${oct(fitLayer(l, kb).octave)}`).join(' · ')}`
+        : `одной рукой, ${oct(fitLayer(a.layers[0], kb).octave)}`
   }
   const uniq = patterns.patterns.length
   const struct = patterns.units
@@ -205,8 +208,9 @@ function PartCard({ lesson, model, onPatch }: { lesson: Lesson; model: PartModel
           <div className="part-arr">
             <b>{profile.short}:</b> {summary || '—'}
           </div>
-          <div className="part-arr muted small">
-            Структура: {uniq} {uniq === 1 ? 'паттерн' : 'паттерна(ов)'} по {patterns.unitBars} такт(а) — {struct || '—'}
+          <div className="part-arr muted small" title="Одинаковые буквы — одинаковая музыка: каждую учите один раз">
+            Из чего состоит: {uniq} {plural(uniq, 'разный кусок', 'разных куска', 'разных кусков')} по {patterns.unitBars}{' '}
+            {plural(patterns.unitBars, 'такту', 'такта', 'тактов')} — {struct || '—'}
           </div>
           {a.warnings.map((w) => (
             <div key={w} className="warn-text small">
@@ -308,6 +312,21 @@ export default function LessonPage() {
 
       {lesson.status === 'ready' && lesson.grid && (
         <>
+          <section className="card cover-cta">
+            <div className="row between">
+              <div>
+                <h3>План кавера</h3>
+                <p className="muted small">
+                  Соберите этот трек в Ableton своими руками: программа разложит его на дорожки и петли, подскажет звуки и проведёт по шагам —
+                  от первой петли до готового трека.
+                  {Object.values(readCoverPrefs(lesson.prefs.cover).done).some(Boolean) ? ' Вы уже начали — продолжайте.' : ''}
+                </p>
+              </div>
+              <Link className="btn primary" to={`/lesson/${lesson.id}/cover`}>
+                Открыть план →
+              </Link>
+            </div>
+          </section>
           <GridCard
             lesson={lesson}
             onGrid={(g) => void patch({ grid: g })}
